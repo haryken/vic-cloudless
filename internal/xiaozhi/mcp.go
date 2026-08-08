@@ -161,7 +161,12 @@ func (h *MCPHandler) handleInitialize(msg ServerMessage) error {
 func (h *MCPHandler) HandleToolsList(msg ServerMessage) error {
 	tools := []map[string]interface{}{
 		toolDef("self.get_device_status",
-			"Get Anki Vector device status (platform, firmware) plus short live summaries when web board games are active (cờ vua chess_summary and/or cờ tướng xiangqi_summary). Call for robot status, or as a quick check before answering about games.",
+			"Get Anki Vector device status (platform, firmware, battery) plus short live summaries when web board games are active (cờ vua chess_summary and/or cờ tướng xiangqi_summary). Call for robot status, or as a quick check before answering about games.",
+			nil, nil),
+		toolDef("self.battery.get",
+			"REQUIRED when the user asks about battery / pin / charge level / đang sạc không. ALWAYS call for: pin còn bao nhiêu, kiểm tra pin, battery, how much battery, phần trăm pin, còn pin không, pin yếu không, đang sạc chưa, is it charging. "+
+				"Returns JSON: percent (0-100), volts, charging (bool), on_charger (bool), charge_state (charging|full_on_charger|on_charger|discharging), summary (Vietnamese to speak), summary_en. "+
+				"Speak BOTH the percent AND whether charging or not (use summary). Do NOT guess — fetch this. Not the same as go_home/charge.",
 			nil, nil),
 		toolDef("self.audio_speaker.set_volume",
 			"Set Vector master speaker volume. Pass 0-100 percent. "+
@@ -311,6 +316,10 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 	case "self.get_device_status":
 		// Keep status JSON parseable; embed any active board-game summaries.
 		fields := []string{`"platform":"vector"`, `"status":"ok"`, `"firmware":"wire-os"`}
+		if bat, err := fetchWiredChess("/api/mods/Battery/get"); err == nil && strings.TrimSpace(bat) != "" {
+			// Embed battery object as raw JSON value.
+			fields = append(fields, `"battery":`+strings.TrimSpace(bat))
+		}
 		for _, pair := range [][2]string{
 			{"chess_summary", "/api/mods/Chess/summary"},
 			{"xiangqi_summary", "/api/mods/Xiangqi/summary"},
@@ -327,6 +336,17 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 			}
 		}
 		text = "{" + strings.Join(fields, ",") + "}"
+
+	case "self.battery.get":
+		body, err := fetchWiredChess("/api/mods/Battery/get")
+		if err != nil {
+			isError = true
+			text = fmt.Sprintf(`{"error":%q}`, err.Error())
+			log.Println("[Xiaozhi] MCP self.battery.get error:", err)
+		} else {
+			text = body
+			log.Println("[Xiaozhi] MCP self.battery.get OK")
+		}
 
 	case "self.audio_speaker.set_volume":
 		vol := 50
