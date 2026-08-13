@@ -787,7 +787,11 @@ func mcpDeferUntilAfterTTS(intent string) bool {
 		"intent_play_keepaway",
 		"intent_play_popawheelie",
 		"intent_play_rollcube",
-		"intent_play_anytrick":
+		"intent_play_anytrick",
+		// Blackjack needs the face + its own TTS. Early same-listen delivery
+		// raced Xiaozhi tinyplay, so BlackJack never GetIn; then Vosk still
+		// loaded (~90MB) with mic closed → "didn't open" + RAM spike.
+		"intent_play_blackjack":
 		return true
 	default:
 		return false
