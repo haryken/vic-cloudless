@@ -289,10 +289,13 @@ sttWait:
 	streamStarted := false
 	streamEnded := false
 	headPadDone := false // Plan A: one head silence pad per stream before real PCM
-	// Soft-cap continuous server TTS. If no Opus for a while the cloud often
-	// stalled without TTSStop (listener stuck in silence keepalive). Tool/
-	// search gaps rarely exceed ~12s; was 45s and felt like mic "never opens".
-	const ttsIdleGap = 12 * time.Second
+	// Soft-cap continuous server TTS if the cloud stalls without TTSStop.
+	// Split: 12s with no TTSStart at all vs a longer gap after audio has
+	// started. News/search tools (google-custom-search-read_webpage) often
+	// pause 12–40s mid-utterance; a 12s mid-stream idle aborted speaking
+	// ("TTS idle … ending stream") while ALSA was only playing keepalive.
+	const ttsFirstWait = 12 * time.Second
+	const ttsIdleGap = 45 * time.Second
 	const ttsAbsoluteMax = 250 * time.Second
 	const ttsSoftCapPCMBytes = 250 * 16000 * 2 // ~250s of 16kHz s16le
 	ttsAbsoluteDeadline := time.After(ttsAbsoluteMax)
@@ -674,9 +677,9 @@ sttWait:
 				}
 			}
 			if !ttsStarted {
-				if time.Since(ttsPhaseStart) > ttsIdleGap {
+				if time.Since(ttsPhaseStart) > ttsFirstWait {
 					releaseListenUI("tts_timeout")
-					return nil, fmt.Errorf("timeout waiting for TTS response (%v)", ttsIdleGap)
+					return nil, fmt.Errorf("timeout waiting for TTS response (%v)", ttsFirstWait)
 				}
 				continue
 			}

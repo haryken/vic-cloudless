@@ -51,16 +51,16 @@ const (
 )
 
 var (
-	alsaMu        sync.Mutex
-	alsaCmd       *exec.Cmd
-	alsaWriter    *os.File
-	alsaPCMCh     chan []byte
-	alsaDone      chan struct{}
-	alsaBytes     int64
+	alsaMu           sync.Mutex
+	alsaCmd          *exec.Cmd
+	alsaWriter       *os.File
+	alsaPCMCh        chan []byte
+	alsaDone         chan struct{}
+	alsaBytes        int64
 	alsaPendingBytes int64 // PCM enqueued but not yet written to FIFO
-	alsaReady     atomic.Bool
-	mixerReady    atomic.Bool
-	alsaKeepalive atomic.Bool
+	alsaReady        atomic.Bool
+	mixerReady       atomic.Bool
+	alsaKeepalive    atomic.Bool
 )
 
 // UseAlsaPlayback reports whether Xiaozhi TTS should go to ALSA (Plan B).
@@ -179,6 +179,48 @@ func alsaStart() error {
 	return nil
 }
 
+func lastS16LE(pcm []byte) (int16, bool) {
+	if len(pcm) < 2 {
+		return 0, false
+	}
+	n := len(pcm) - (len(pcm) % 2)
+	return int16(uint16(pcm[n-2]) | uint16(pcm[n-1])<<8), true
+}
+
+func fadeS16LEToZero(from int16, samples int) []byte {
+	if samples < 1 {
+		samples = 1
+	}
+	out := make([]byte, samples*2)
+	for i := 0; i < samples; i++ {
+		v := int16(int(from) * (samples - 1 - i) / samples)
+		out[i*2] = byte(v)
+		out[i*2+1] = byte(v >> 8)
+	}
+	return out
+}
+
+func fadeS16LEFrom(pcm []byte, from, toward int16, samples int) []byte {
+	if len(pcm) < 2 || samples < 1 {
+		return pcm
+	}
+	n := len(pcm) / 2
+	if samples > n {
+		samples = n
+	}
+	out := append([]byte(nil), pcm...)
+	end := int16(uint16(pcm[0]) | uint16(pcm[1])<<8)
+	if toward != 0 {
+		end = toward
+	}
+	for i := 0; i < samples; i++ {
+		v := int16(int(from) + (int(end)-int(from))*(i+1)/samples)
+		out[i*2] = byte(v)
+		out[i*2+1] = byte(v >> 8)
+	}
+	return out
+}
+
 func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd) {
 	defer func() {
 		alsaKeepalive.Store(false)
@@ -206,13 +248,17 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 
 	var lastRealPCM time.Time
 	var gapLogged bool
+	var lastSample int16
+	var inKeepalive bool
 	// Opus frames arrive ~20–60ms; inter-sentence gaps often 200–800ms.
 	// Hardware buffer (~2.5s) covers short gaps without pad. Pad earlier
 	// than that (~350ms) so tool/LLM stalls never hit underrun (underrun =
-	// giật rè). Digital zero after real PCM is continuous if we never run dry.
+	// giật rè). Hard-zero after a non-zero sample clicks; fade last sample
+	// to 0 (and 0 back to speech) to avoid that splice.
 	const (
 		minGapBeforePad = 350 * time.Millisecond
 		maxGapPad       = 60 * time.Second
+		fadeSamples     = 128 // 8ms @ 16kHz
 	)
 
 	writeFIFO := func(pcm []byte) error {
@@ -249,6 +295,13 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 			if len(pcm) == 0 {
 				continue
 			}
+			if inKeepalive {
+				pcm = fadeS16LEFrom(pcm, 0, lastSample, fadeSamples)
+				inKeepalive = false
+			}
+			if s, ok := lastS16LE(pcm); ok {
+				lastSample = s
+			}
 			lastRealPCM = time.Now()
 			gapLogged = false
 			if err := writeFIFO(pcm); err != nil {
@@ -270,15 +323,21 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 				log.Printf("[Xiaozhi][ALSA] gap keepalive after %v idle — silence for tool/LLM pause",
 					idle.Round(time.Millisecond))
 				gapLogged = true
+				burst := fadeS16LEToZero(lastSample, fadeSamples)
+				rest := alsaKeepaliveBytes*4 - len(burst)
+				if rest < 0 {
+					rest = 0
+				}
+				burst = append(burst, make([]byte, rest)...)
+				inKeepalive = true
+				lastSample = 0
+				if err := writeFIFO(burst); err != nil {
+					log.Println("[Xiaozhi][ALSA] keepalive write:", err)
+					return
+				}
+				continue
 			}
-			// Burst a bit of silence to refill the ring before drips keep pace.
-			// First tick after threshold: ~256ms; then regular keepalive chunks.
-			burst := silence
-			if idle < minGapBeforePad+alsaKeepaliveEvery*2 {
-				big := make([]byte, alsaKeepaliveBytes*4) // ~256ms
-				burst = big
-			}
-			if err := writeFIFO(burst); err != nil {
+			if err := writeFIFO(silence); err != nil {
 				log.Println("[Xiaozhi][ALSA] keepalive write:", err)
 				return
 			}
