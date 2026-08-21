@@ -13,20 +13,38 @@ import (
 	"github.com/digital-dream-labs/vector-cloud/internal/log"
 )
 
-// GameGoogleTTSVIEnabled reports whether Google Vietnamese game comments are allowed
-// (configured on Xiaozhi tab; works under both Vosk and Xiaozhi listen modes).
+// GameGoogleTTSVIEnabled reports whether Google game comments are allowed.
+// Always true — language is selected in the Games lobby.
 func GameGoogleTTSVIEnabled() bool {
-	return LoadConfig().GameGoogleTTSVI
+	return true
 }
 
-// RunGoogleViAnnounce fetches Google Translate TTS (vi) and plays via ALSA.
-// Falls back to Acapela SayText on failure.
+// GameGoogleTTSLang returns the configured Google TTS language (default vi).
+func GameGoogleTTSLang() string {
+	lang := strings.TrimSpace(LoadConfig().GameGoogleTTSLang)
+	if lang == "" {
+		return "vi"
+	}
+	return lang
+}
+
+// RunGoogleViAnnounce fetches Google Translate TTS and plays via ALSA.
+// Falls back to Acapela SayText on failure. Uses configured lang (default vi).
 func RunGoogleViAnnounce(text string) error {
+	return RunGoogleAnnounce(text, GameGoogleTTSLang())
+}
+
+// RunGoogleAnnounce fetches Google Translate TTS for lang and plays via ALSA.
+func RunGoogleAnnounce(text, lang string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
 	}
-	log.Printf("[Xiaozhi][Chess] announce Google VI: %q", text)
+	lang = strings.TrimSpace(lang)
+	if lang == "" {
+		lang = "vi"
+	}
+	log.Printf("[Xiaozhi][Chess] announce Google TTS lang=%s: %q", lang, text)
 	DisarmRelistenPending()
 
 	// Mark busy for the whole announce so the next chess-announce does not
@@ -34,19 +52,19 @@ func RunGoogleViAnnounce(text string) error {
 	SetPlaying(true)
 	defer SetPlaying(false)
 
-	pcm, err := fetchGoogleTranslatePCM16kMulti(text, "vi")
+	pcm, err := fetchGoogleTranslatePCM16kMulti(text, lang)
 	if err != nil {
-		log.Println("[Xiaozhi][Chess] Google VI TTS failed, SayText fallback:", err)
+		log.Println("[Xiaozhi][Chess] Google TTS failed, SayText fallback:", err)
 		return RunChessAnnounce(text)
 	}
 	// Google Translate TTS is quieter than Acapela / Xiaozhi; soft-boost before ALSA.
 	// Keep gain modest — 3× + noisy MP3 decode saturates and sounds rè.
 	pcm = ApplyGain(pcm, 1.7)
 	if err := playPCM16kALSA(pcm); err != nil {
-		log.Println("[Xiaozhi][Chess] Google VI ALSA failed, SayText fallback:", err)
+		log.Println("[Xiaozhi][Chess] Google ALSA failed, SayText fallback:", err)
 		return RunChessAnnounce(text)
 	}
-	log.Println("[Xiaozhi][Chess] announce done (Google VI)")
+	log.Println("[Xiaozhi][Chess] announce done (Google TTS)")
 	return nil
 }
 

@@ -29,6 +29,7 @@ type chessAnnounceMsg struct {
 	Say     string `json:"say"`
 	Prompt  string `json:"prompt"`
 	Summary string `json:"summary"`
+	Lang    string `json:"lang"`
 }
 
 // SetSpeakText registers engine SayText (Acapela robot voice) for chess comments.
@@ -99,6 +100,7 @@ func parseChessAnnounce(raw string) chessAnnounceMsg {
 			m.Say = strings.TrimSpace(m.Say)
 			m.Prompt = strings.TrimSpace(m.Prompt)
 			m.Summary = strings.TrimSpace(m.Summary)
+			m.Lang = strings.TrimSpace(m.Lang)
 			if m.Say == "" && m.Prompt != "" {
 				m.Say = m.Prompt
 			}
@@ -111,12 +113,16 @@ func parseChessAnnounce(raw string) chessAnnounceMsg {
 	return chessAnnounceMsg{Mode: "saytext", Say: raw}
 }
 
-// RunChessAnnounceMsg dispatches SayText, Google VI TTS, or Xiaozhi conversation mode.
+// RunChessAnnounceMsg dispatches SayText, Google TTS, or Xiaozhi conversation mode.
 func RunChessAnnounceMsg(m chessAnnounceMsg) error {
 	switch m.Mode {
 	case "google_vi":
 		if GameGoogleTTSVIEnabled() {
-			return RunGoogleViAnnounce(m.Say)
+			lang := m.Lang
+			if lang == "" {
+				lang = GameGoogleTTSLang()
+			}
+			return RunGoogleAnnounce(m.Say, lang)
 		}
 		return RunChessAnnounce(m.Say)
 	case "xiaozhi":
