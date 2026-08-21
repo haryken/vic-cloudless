@@ -26,6 +26,9 @@ type Config struct {
 	SessionIdleSec        int    `json:"session_idle_sec"`
 	TTSMode               string `json:"tts_mode"`
 	GameGoogleTTSVI       bool   `json:"game_google_tts_vi"`
+	// IdentityMode: "vi_pool" = shared Vietnamese preset (rotate MAC/UUID on boot);
+	// "custom" = user-paired xiaozhi.me device.
+	IdentityMode string `json:"identity_mode,omitempty"`
 }
 
 func defaultConfig() Config {

@@ -241,6 +241,18 @@ func xzcloudinit() xiaozhi.Config {
 	if !cfg.Enabled {
 		return cfg
 	}
+	if xiaozhi.IsViPool(cfg) {
+		if xiaozhi.ConsumeSkipRotate() {
+			log.Printf("[Xiaozhi] vi_pool keep MAC=%s client=%s", cfg.DeviceID, cfg.ClientID)
+		} else {
+			xiaozhi.RotateViPoolIdentity(&cfg)
+			if err := xiaozhi.SaveConfig(cfg); err != nil {
+				log.Println("[Xiaozhi] vi_pool save:", err)
+			} else {
+				log.Printf("[Xiaozhi] vi_pool identity MAC=%s client=%s", cfg.DeviceID, cfg.ClientID)
+			}
+		}
+	}
 	initChessSpeak()
 	xiaozhi.StartChessAnnounceWatcher()
 	if cfg.DeviceID != "" && cfg.ClientID != "" {
