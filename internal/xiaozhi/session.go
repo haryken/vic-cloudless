@@ -13,6 +13,14 @@ import (
 // ErrAborted is returned when a turn is interrupted by barge-in (wake word / button).
 var ErrAborted = errors.New("xiaozhi turn aborted")
 
+// ErrConversationEnded is returned when EnsureConnected refuses to Dial after
+// the Xiaozhi server sent goodbye / closed WSS. Cleared on a real user wake.
+var ErrConversationEnded = errors.New("xiaozhi conversation ended by server")
+
+// ErrSkipRelisten is returned when TriggerRelisten refuses to FakeTrigger
+// because the server already ended the WebSocket.
+var ErrSkipRelisten = errors.New("skip relisten — server ended WSS")
+
 const (
 	// CancelFlagPath asks anim to stop ExternalAudio immediately (ESP32-style barge-in).
 	CancelFlagPath = "/run/vic-cloud/xiaozhi-cancel"
@@ -30,8 +38,8 @@ type sessionState struct {
 	turnCancel context.CancelFunc
 	// turnGen increments on every BindTurn so an aborted turn cannot Unbind /
 	// CleanupPlaybackFiles belonging to a newer listen/TTS round (barge-in race).
-	turnGen   uint64
-	playing   bool
+	turnGen uint64
+	playing bool
 	// playingSince is set when playing flips true; used to ignore false-wake
 	// barge-in in the first moments of TTS (hotword often queued during the
 	// long wait for the first Opus frame).
@@ -40,6 +48,13 @@ type sessionState struct {
 	// not yet playing, Hey Vector must not cancel the turn (silent robot).
 	ttsPending bool
 	idleTimer  *time.Timer
+	// serverEnded is set when the cloud sends type=goodbye (or WSS drops at
+	// end of turn). Continuous relisten must not FakeTrigger or Dial until a
+	// real Hey Vector / backpack wake clears it.
+	serverEnded bool
+	// relistenArmed is set by TriggerRelisten and consumed on the next hotword
+	// so we can tell FakeTrigger apart from a real user wake.
+	relistenArmed bool
 }
 
 var sess sessionState
@@ -48,6 +63,17 @@ var sess sessionState
 // In continuous mode the same session_id is reused across listen rounds.
 func EnsureConnected(ctx context.Context, cfg Config) (*Client, error) {
 	sess.mu.Lock()
+
+	if sess.serverEnded {
+		sess.mu.Unlock()
+		return nil, ErrConversationEnded
+	}
+	if sess.client != nil && sess.client.TakeGoodbye() {
+		sess.serverEnded = true
+		closeSessionLocked("server_goodbye")
+		sess.mu.Unlock()
+		return nil, ErrConversationEnded
+	}
 
 	if sess.client != nil && sess.client.Alive() {
 		// Drop stale STT/TTS/audio from the previous round before reuse.
@@ -130,6 +156,7 @@ func closeSessionLocked(reason string) {
 		sess.idleTimer.Stop()
 		sess.idleTimer = nil
 	}
+	AbandonPostCaptureAwait("wss_" + reason)
 	if sess.client == nil {
 		return
 	}
@@ -279,8 +306,15 @@ func FinishTurn(gen uint64, keepSession bool, forceClose bool) {
 		sess.turnCancel = nil
 		sess.ttsPending = false
 	}
-	if forceClose || !keepSession {
-		closeSessionLocked("turn_end")
+	dead := sess.client != nil && !sess.client.Alive()
+	if forceClose || !keepSession || dead {
+		reason := "turn_end"
+		if sess.serverEnded {
+			reason = "server_goodbye"
+		} else if dead && !forceClose {
+			reason = "wss_dead"
+		}
+		closeSessionLocked(reason)
 		return
 	}
 	resetIdleTimerLocked()
@@ -573,6 +607,49 @@ func SessionAlive() bool {
 	return ActiveSessionID() != ""
 }
 
+// MarkServerEndedConversation records that the Xiaozhi server ended the session
+// (type=goodbye or WSS drop after TTS). Relisten / Dial stay blocked until a
+// real user wake calls ClearServerEndedConversation.
+func MarkServerEndedConversation() {
+	sess.mu.Lock()
+	sess.serverEnded = true
+	sess.mu.Unlock()
+}
+
+// ClearServerEndedConversation allows the next EnsureConnected to Dial.
+// Call only from a real Hey Vector / backpack hotword, not FakeTrigger.
+func ClearServerEndedConversation() {
+	sess.mu.Lock()
+	if sess.serverEnded {
+		log.Println("[Xiaozhi] user wake — clear server-ended latch (new conversation)")
+	}
+	sess.serverEnded = false
+	sess.mu.Unlock()
+}
+
+// ServerEndedConversation is true after server goodbye until the next user wake.
+func ServerEndedConversation() bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return sess.serverEnded
+}
+
+// ArmContinuousRelisten marks the next hotword as a FakeTrigger from TriggerRelisten.
+func ArmContinuousRelisten() {
+	sess.mu.Lock()
+	sess.relistenArmed = true
+	sess.mu.Unlock()
+}
+
+// ConsumeContinuousRelisten returns whether this hotword was armed by TriggerRelisten.
+func ConsumeContinuousRelisten() bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	armed := sess.relistenArmed
+	sess.relistenArmed = false
+	return armed
+}
+
 // BargeIn interrupts the current Xiaozhi turn/playback like xiaozhi-esp32 AbortSpeaking:
 // send abort on the open WSS (same session), cancel the turn, stop ExternalAudio,
 // wait briefly for the speaker to go idle, then return so a new listen can start.
@@ -712,9 +789,9 @@ var (
 	// Early MCP delivery: when tools/call arrives before the ~9s noaudio deadline,
 	// deliver the robot intent on the SAME listen (instead of noaudio + FakeTrigger).
 	// FakeTrigger ListeningGetIn was racing the Seasonal anim and cutting fireworks.
-	earlyMu            sync.Mutex
-	earlyIntent        string
-	earlyParams        map[string]string
+	earlyMu              sync.Mutex
+	earlyIntent          string
+	earlyParams          map[string]string
 	earlyDeliveredIntent string
 )
 

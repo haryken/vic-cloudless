@@ -33,6 +33,29 @@ type TurnResult struct {
 	EndConversation bool
 }
 
+// waitForServerBye waits briefly after TTS stop for type=goodbye or WSS drop.
+// Xiaozhi cloud typically sends goodbye immediately after tts stop.
+func waitForServerBye(client *Client, d time.Duration) bool {
+	if client == nil {
+		return true
+	}
+	if client.TakeGoodbye() || !client.Alive() {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for {
+		select {
+		case <-client.GoodbyeCh():
+			return true
+		case <-client.ErrCh():
+			return true
+		case <-timer.C:
+			return client.TakeGoodbye() || !client.Alive()
+		}
+	}
+}
+
 // RunTurn executes a complete Xiaozhi voice turn:
 //  1. Connect to server (or reuse), send hello
 //  2. ListenStart, stream audio from audioBuf, ListenStop
@@ -61,6 +84,11 @@ func RunTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 		return nil, fmt.Errorf("xiaozhi dial: %w", err)
 	}
 	turnGen := BindTurn(turnCancel)
+	// A cancelled analyze_photo can leave streamSuspend / await flags set after
+	// the listen that started it has already ended. Those flags drop Opus and
+	// ignore tts stop — the next conversation is silent. Bump gen so a late
+	// ResumePlaybackAfterCapture cannot re-poison this listen.
+	AbandonPostCaptureAwait("new_listen")
 	defer func() {
 		UnbindTurn(turnGen)
 		if turnCtx.Err() == context.Canceled {
@@ -695,13 +723,21 @@ sttWait:
 			if AwaitPostCaptureStream() {
 				continue
 			}
-			// No audio yet: allow LLM thinking time up to absolute max (handled below).
+			// No PCM yet: allow LLM thinking unless we already have TTS sentences
+			// (camera leftover used to ignore tts stop and hang 15m with silence).
 			if lastAudioAt.IsZero() {
+				if ttsStarted && !IgnorePrematureTTSStop() && time.Since(ttsPhaseStart) > ttsIdleGap {
+					log.Printf("[Xiaozhi] TTS idle %v with sentences but no PCM — ending stream", ttsIdleGap)
+					AbandonPostCaptureAwait("tts_idle_no_pcm")
+					abortServerTTS("idle_no_pcm")
+					ttsStopped = true
+					endStreamFlush()
+				}
 				continue
 			}
 			if time.Since(lastAudioAt) > ttsIdleGap {
 				log.Printf("[Xiaozhi] TTS idle %v since last audio — ending stream (partial ok)", ttsIdleGap)
-				ClearAwaitPostCaptureStream()
+				AbandonPostCaptureAwait("tts_idle")
 				abortServerTTS("idle_timeout")
 				ttsStopped = true
 				endStreamFlush()
@@ -728,6 +764,15 @@ sttWait:
 
 	if turnCtx.Err() == context.Canceled {
 		return nil, ErrAborted
+	}
+
+	if endConversation {
+		MarkServerEndedConversation()
+	} else if waitForServerBye(client, 400*time.Millisecond) {
+		endConversation = true
+		forceClose = true
+		MarkServerEndedConversation()
+		log.Println("[Xiaozhi] goodbye/WSS close after TTS stop — end conversation (no relisten)")
 	}
 
 	releaseListenUI("turn_complete")

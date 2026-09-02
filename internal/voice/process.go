@@ -175,6 +175,14 @@ procloop:
 			case cloud.MessageTag_Hotword:
 				// hotword = get ready to stream data
 				if xiaozhi.Enabled() {
+					if xiaozhi.ConsumeContinuousRelisten() {
+						if xiaozhi.ServerEndedConversation() {
+							log.Println("[Xiaozhi][Mic] ignore relisten hotword — server ended WSS")
+							continue
+						}
+					} else {
+						xiaozhi.ClearServerEndedConversation()
+					}
 					// Already mid-listen with mic flowing: ignore duplicate Hey Vector
 					// so we do not abort the utterance before STT completes.
 					// If listen started but mic never uplinked, do NOT ignore — restart.

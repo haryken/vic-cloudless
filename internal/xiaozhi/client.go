@@ -11,17 +11,19 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/digital-dream-labs/vector-cloud/internal/log"
 )
 
 // Message types from server.
 const (
-	MsgTypeHello        = "hello"
-	MsgTypeTTS          = "tts"
-	MsgTypeLLM          = "llm"
-	MsgTypeSTT          = "stt"
-	MsgTypeMCP          = "mcp"
-	MsgTypeGoodbye      = "goodbye"
-	MsgTypeError        = "error"
+	MsgTypeHello   = "hello"
+	MsgTypeTTS     = "tts"
+	MsgTypeLLM     = "llm"
+	MsgTypeSTT     = "stt"
+	MsgTypeMCP     = "mcp"
+	MsgTypeGoodbye = "goodbye"
+	MsgTypeError   = "error"
 )
 
 // TTSState values.
@@ -83,12 +85,12 @@ func Dial(dialCtx context.Context, cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		cfg:       cfg,
-		conn:      conn,
-		sttCh:     make(chan string, 8),
+		cfg:   cfg,
+		conn:  conn,
+		sttCh: make(chan string, 8),
 		// Large TTS/LLM buffers: sentence_start floods must not drop (default: lose text).
-		ttsCh:     make(chan ServerMessage, 128),
-		llmCh:     make(chan ServerMessage, 128),
+		ttsCh: make(chan ServerMessage, 128),
+		llmCh: make(chan ServerMessage, 128),
 		// Deep enough that slow arm/pad must not drop head Opus (was 256 + silent drop).
 		audioCh:   make(chan []byte, 1024),
 		mcpCh:     make(chan ServerMessage, 16),
@@ -151,6 +153,7 @@ func (c *Client) markDeadLocked() {
 // MCP (mcpCh) is intentionally NOT drained — the MCP pump must answer
 // initialize / tools/list promptly. Dropping those (e.g. after a silence
 // STT timeout) leaves the server without self-control tools for the session.
+// goodbyeCh is also NOT drained — that is the server end-conversation signal.
 func (c *Client) DrainEventChannels() {
 	for {
 		select {
@@ -158,10 +161,19 @@ func (c *Client) DrainEventChannels() {
 		case <-c.ttsCh:
 		case <-c.llmCh:
 		case <-c.audioCh:
-		case <-c.goodbyeCh:
 		default:
 			return
 		}
+	}
+}
+
+// TakeGoodbye non-blockingly consumes a queued server goodbye.
+func (c *Client) TakeGoodbye() bool {
+	select {
+	case <-c.goodbyeCh:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -439,6 +451,11 @@ func (c *Client) readLoop(ctx context.Context) {
 			default:
 			}
 		case MsgTypeGoodbye:
+			c.mu.Lock()
+			c.markDeadLocked()
+			c.mu.Unlock()
+			MarkServerEndedConversation()
+			log.Println("[Xiaozhi] server goodbye — mark WSS dead")
 			select {
 			case c.goodbyeCh <- struct{}{}:
 			default:

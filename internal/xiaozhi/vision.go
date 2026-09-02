@@ -201,13 +201,13 @@ func AnalyzeScene(ctx context.Context, question string) (string, error) {
 		analyzeMu.Unlock()
 	}()
 
-	SuspendPlaybackForCapture()
+	capGen := SuspendPlaybackForCapture()
 
 	// Capture FIRST — Xiaozhi cancels tools/call around ~8–10s. Shutter before
 	// capture burned ~0.8s and tipped us over the budget (notifications/cancelled
 	// → LLM says "timeout" even when Explain later succeeds).
 	jpeg, err := captureJPEGForAnalysis(ctx)
-	ResumePlaybackAfterCapture()
+	ResumePlaybackAfterCapture(capGen)
 	NoteAnalyzeAttempt()
 	if err != nil {
 		f.err = fmt.Errorf("capture: %w", err)
