@@ -249,9 +249,21 @@ func (strm *Streamer) runXiaozhiTurn() {
 				log.Println("[Xiaozhi] silence after listen — mic closed until Hey Vector / button")
 			}
 		}
+		// intent_system_noaudio often consumes respOnce first so the engine drops
+		// the listen UI before STT finishes. process.go keeps that Vector stream
+		// open for a late MCP intent — if STT then fails, a respOnce-guarded
+		// OnError is a no-op and the stream stays open forever (mic_sock EAGAIN,
+		// Hey Vector face with no Xiaozhi turn). Always release the process stream.
+		sent := false
 		strm.respOnce.Do(func() {
 			strm.receiver.OnError(cloud.ErrorType_Server, err)
+			sent = true
 		})
+		if !sent {
+			log.Println("[Xiaozhi] turn error after noaudio — forcing process stream release")
+			strm.receiver.OnError(cloud.ErrorType_Server,
+				fmt.Errorf("stream release after noaudio: %v", err))
+		}
 		return
 	}
 

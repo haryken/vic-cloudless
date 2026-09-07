@@ -42,7 +42,10 @@ type Process struct {
 	intents   []MsgSender
 	kill      chan struct{}
 	msg       chan messageEvent
-	opts      options
+	// dropStream asks Run to Close a stream that was kept open after
+	// intent_system_noaudio (MCP await) once the failsafe timer fires.
+	dropStream chan *stream.Streamer
+	opts       options
 }
 
 // AddReceiver adds the given Receiver to the list of sources the
@@ -164,12 +167,24 @@ func (p *Process) Run(ctx context.Context, options ...Option) {
 	}
 	defer connCheck.Close()
 
+	if p.dropStream == nil {
+		p.dropStream = make(chan *stream.Streamer, 4)
+	}
+
 	var strm *stream.Streamer
 procloop:
 	for {
 		// the cases in this select should NOT block! if messages that others send us
 		// are not promptly read, socket buffers can fill up and break voice processing
 		select {
+		case s := <-p.dropStream:
+			if strm != nil && s == strm {
+				log.Println("[Xiaozhi][Mic] drop kept stream (noaudio MCP wait expired)")
+				if err := strm.Close(); err != nil {
+					log.Println("Error closing kept stream:")
+				}
+				strm = nil
+			}
 		case msg := <-p.msg:
 			switch msg.msg.Tag() {
 			case cloud.MessageTag_Hotword:
@@ -327,9 +342,19 @@ procloop:
 			// hit NoCloud. Keep the Vector stream open so a follow-up MCP self-control
 			// OnIntent (e.g. fireworks) is still delivered — otherwise process.go
 			// nils strm here and logs "Ignoring result from prior stream".
+			// Failsafe: if STT fails after noaudio, respOnce cannot OnError — without
+			// a timer the stream stays open and mic_sock backs up (Hey Vector dies).
 			if xiaozhi.Enabled() && intent.result != nil &&
 				intent.result.Intent == "intent_system_noaudio" {
 				log.Println("[Xiaozhi][Mic] keep Vector stream after noaudio (await MCP)")
+				kept := strm
+				go func(s *stream.Streamer) {
+					time.Sleep(20 * time.Second)
+					select {
+					case p.dropStream <- s:
+					default:
+					}
+				}(kept)
 				continue
 			}
 
@@ -346,9 +371,18 @@ procloop:
 			}
 			logVerbose("Received error from cloud:", err.err)
 			p.signalMicStop()
-			p.writeError(err.kind, err.err)
-			if p.opts.errListener != nil {
-				p.opts.errListener.OnError(err.err)
+			// Xiaozhi already closed listen UI with noaudio; a late STT failure only
+			// needs to release the kept stream — do not push a second engine Error
+			// (that becomes NoCloud / idk after a successful listen getout).
+			skipEngineErr := xiaozhi.Enabled() && err.err != nil &&
+				strings.Contains(err.err.Error(), "stream release after noaudio")
+			if skipEngineErr {
+				log.Println("[Xiaozhi][Mic] close stream after listen teardown (no engine error):", err.err)
+			} else {
+				p.writeError(err.kind, err.err)
+				if p.opts.errListener != nil {
+					p.opts.errListener.OnError(err.err)
+				}
 			}
 			if err := strm.Close(); err != nil {
 				log.Println("Error closing context:")
@@ -416,13 +450,20 @@ func SetVerbose(value bool) {
 }
 
 func (p *Process) defaultChipperOptions() chipper.StreamOpts {
+	// Xiaozhi keeps the Vector stream open after noaudio for late MCP; the
+	// stock 9s Chipper timeout would cancel the streamer mid STT/TTS wait and
+	// race the keep-open path. Turn budget lives in xiaozhi.RunTurn instead.
+	timeout := DefaultTimeout
+	if xiaozhi.Enabled() {
+		timeout = 3 * time.Minute
+	}
 	return chipper.StreamOpts{
 		CompressOpts: chipper.CompressOpts{
 			Compress:   p.opts.compress,
 			Bitrate:    66 * 1024,
 			Complexity: 0,
 			FrameSize:  60},
-		Timeout: DefaultTimeout,
+		Timeout: timeout,
 	}
 }
 
