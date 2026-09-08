@@ -34,7 +34,7 @@ type Config struct {
 
 func defaultConfig() Config {
 	return Config{
-		Enabled:               false,
+		Enabled:               true,
 		OTABaseURL:            "https://api.tenclass.net/",
 		Endpoint:              "wss://api.tenclass.net/xiaozhi/v1/",
 		ProtocolVersion:       1,
@@ -43,6 +43,9 @@ func defaultConfig() Config {
 		IdleTimeoutSec:        20,
 		SessionIdleSec:        30,
 		TTSMode:               "xiaozhi",
+		GameGoogleTTSVI:       true,
+		GameGoogleTTSLang:     "vi",
+		IdentityMode:          IdentityViPool,
 	}
 }
 
