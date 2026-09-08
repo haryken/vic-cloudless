@@ -187,8 +187,12 @@ func AnalyzeScene(ctx context.Context, question string) (string, error) {
 	if f := analyzeFlight; f != nil {
 		analyzeMu.Unlock()
 		log.Println("[Xiaozhi] analyze_photo waiting — join in-flight capture")
-		<-f.done
-		return f.result, f.err
+		select {
+		case <-f.done:
+			return f.result, f.err
+		case <-ctx.Done():
+			return "", fmt.Errorf("waiting for in-flight analysis: %w", ctx.Err())
+		}
 	}
 	f := &analyzeFlightState{done: make(chan struct{})}
 	analyzeFlight = f
@@ -207,12 +211,15 @@ func AnalyzeScene(ctx context.Context, question string) (string, error) {
 	// capture burned ~0.8s and tipped us over the budget (notifications/cancelled
 	// → LLM says "timeout" even when Explain later succeeds).
 	jpeg, err := captureJPEGForAnalysis(ctx)
-	ResumePlaybackAfterCapture()
 	NoteAnalyzeAttempt()
 	if err != nil {
+		// Capture can time out before ResumePlaybackAfterCapture. Always clear
+		// streamSuspend/post-camera state so later turns can speak and relisten.
+		AbandonPostCaptureAwait("capture_failed")
 		f.err = fmt.Errorf("capture: %w", err)
 		return "", f.err
 	}
+	ResumePlaybackAfterCapture()
 	log.Printf("[Xiaozhi] analyze_photo captured %d bytes JPEG", len(jpeg))
 
 	// Shutter in parallel with Explain — UX click without blocking the MCP reply.

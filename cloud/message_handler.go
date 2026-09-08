@@ -2664,17 +2664,21 @@ func (service *rpcService) EnableMirrorMode(ctx context.Context, request *extint
 // CaptureJPEGBytes grabs one camera frame as JPEG for Xiaozhi vision (analyze_photo).
 // Same path as CaptureSingleImage / WirePod DoGetImage.
 func CaptureJPEGBytes(ctx context.Context, highRes bool) ([]byte, error) {
-	_ = ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	svc := &rpcService{}
 	// Always force camera stream off afterwards — leftover ImageChunk buffering
 	// after analyze_photo has been starving MemAvailable into yellow fault while "idle".
 	defer func() {
-		_, _ = svc.EnableImageStreaming(nil, &extint.EnableImageStreamingRequest{
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = svc.EnableImageStreaming(cleanupCtx, &extint.EnableImageStreamingRequest{
 			Enable:               false,
 			EnableHighResolution: false,
 		})
 	}()
-	resp, err := svc.CaptureSingleImage(nil, &extint.CaptureSingleImageRequest{
+	resp, err := svc.CaptureSingleImage(ctx, &extint.CaptureSingleImageRequest{
 		EnableHighResolution: highRes,
 	})
 	if err != nil {
@@ -2688,8 +2692,11 @@ func CaptureJPEGBytes(ctx context.Context, highRes bool) ([]byte, error) {
 
 // Capture a single image using the camera
 func (service *rpcService) CaptureSingleImage(ctx context.Context, request *extint.CaptureSingleImageRequest) (*extint.CaptureSingleImageResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Enable image stream
-	_, err := service.EnableImageStreaming(nil, &extint.EnableImageStreamingRequest{
+	_, err := service.EnableImageStreaming(ctx, &extint.EnableImageStreamingRequest{
 		Enable:               true,
 		EnableHighResolution: request.EnableHighResolution,
 	})
@@ -2699,10 +2706,14 @@ func (service *rpcService) CaptureSingleImage(ctx context.Context, request *exti
 	}
 
 	// Disable image stream
-	defer service.EnableImageStreaming(nil, &extint.EnableImageStreamingRequest{
-		Enable:               false,
-		EnableHighResolution: false,
-	})
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = service.EnableImageStreaming(cleanupCtx, &extint.EnableImageStreamingRequest{
+			Enable:               false,
+			EnableHighResolution: false,
+		})
+	}()
 
 	// 32 is enough for one reassembled JPEG; 1024 ImageChunks ballooned RAM
 	// and contributed to yellow fault countdown after analyze_photo.
@@ -2716,28 +2727,37 @@ func (service *rpcService) CaptureSingleImage(ctx context.Context, request *exti
 		Size:    0,
 	}
 
-	for result := range cameraFeedChannel {
-		imageChunk := result.GetImageChunk()
-		readyToSend := UnpackCameraImageChunk(imageChunk, &cache)
-		if readyToSend {
-			capturedSingleImage := &extint.CaptureSingleImageResponse{
-				FrameTimeStamp: imageChunk.GetFrameTimeStamp(),
-				ImageId:        uint32(cache.ImageId),
-				ImageEncoding:  imageChunk.GetImageEncoding(),
-				Data:           cache.Data[0:cache.Size],
+	for {
+		select {
+		case result, ok := <-cameraFeedChannel:
+			if !ok {
+				errMsg := "ImageChunk engine stream died unexpectedly"
+				log.Errorln(errMsg)
+				return nil, grpc.Errorf(codes.Internal, errMsg)
 			}
-			capturedSingleImage.Status = &extint.ResponseStatus{Code: extint.ResponseStatus_RESPONSE_RECEIVED}
-			return capturedSingleImage, nil
+			imageChunk := result.GetImageChunk()
+			readyToSend := UnpackCameraImageChunk(imageChunk, &cache)
+			if readyToSend {
+				capturedSingleImage := &extint.CaptureSingleImageResponse{
+					FrameTimeStamp: imageChunk.GetFrameTimeStamp(),
+					ImageId:        uint32(cache.ImageId),
+					ImageEncoding:  imageChunk.GetImageEncoding(),
+					Data:           cache.Data[0:cache.Size],
+				}
+				capturedSingleImage.Status = &extint.ResponseStatus{Code: extint.ResponseStatus_RESPONSE_RECEIVED}
+				return capturedSingleImage, nil
+			}
+		case <-ctx.Done():
+			return nil, grpc.Errorf(codes.DeadlineExceeded, "camera capture: %v", ctx.Err())
 		}
 	}
-
-	errMsg := "ImageChunk engine stream died unexpectedly"
-	log.Errorln(errMsg)
-	return nil, grpc.Errorf(codes.Internal, errMsg)
 }
 
 // TODO VIC-11579 Support specifying streaming resolution
 func (service *rpcService) EnableImageStreaming(ctx context.Context, request *extint.EnableImageStreamingRequest) (*extint.EnableImageStreamingResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	f, responseChan := engineProtoManager.CreateChannel(&extint.GatewayWrapper_EnableImageStreamingResponse{}, 1)
 	defer f()
 
@@ -2750,9 +2770,15 @@ func (service *rpcService) EnableImageStreaming(ctx context.Context, request *ex
 		return nil, err
 	}
 
-	payload, ok := <-responseChan
-	if !ok {
-		return nil, grpc.Errorf(codes.Internal, "Failed to retrieve message")
+	var payload extint.GatewayWrapper
+	select {
+	case response, ok := <-responseChan:
+		if !ok {
+			return nil, grpc.Errorf(codes.Internal, "Failed to retrieve message")
+		}
+		payload = response
+	case <-ctx.Done():
+		return nil, grpc.Errorf(codes.DeadlineExceeded, "enable image streaming: %v", ctx.Err())
 	}
 
 	response := payload.GetEnableImageStreamingResponse()

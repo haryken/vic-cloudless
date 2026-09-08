@@ -30,9 +30,9 @@ const (
 	// Balanced window for 426MB Vector (2026-07-15 mitigate pack):
 	// Between old ~8s/40k portal (LMK risk) and trial ~4s/20k (ALSA underrun/SIGILL).
 	// Still streams long audio via punch+throttle; soft-capped in turn.go (~100s).
-	pcmWindowAheadBytes = 192 * 1024 // ~6s @ 16kHz s16le
-	pcmPunchKeepBytes   = 48 * 1024  // ~1.5s cushion
-	pcmHardCapBytes          = 1024 * 1024 // ~32s unpunched live
+	pcmWindowAheadBytes      = 192 * 1024      // ~6s @ 16kHz s16le
+	pcmPunchKeepBytes        = 48 * 1024       // ~1.5s cushion
+	pcmHardCapBytes          = 1024 * 1024     // ~32s unpunched live
 	pcmHardCapPunchFailBytes = 3 * 1024 * 1024 // ~96s if punch unsupported
 
 	SilencePrimeChunkBytes = 1024
@@ -508,11 +508,10 @@ func TriggerRelisten() error {
 		return nil
 	}
 	DisarmRelistenPending()
-	if err := os.WriteFile(RelistenFlagPath, []byte("1"), 0644); err != nil {
-		return err
-	}
-	_ = os.WriteFile("/run/xiaozhi-relisten", []byte("1"), 0644)
-	return nil
+	// Current vic-anim checks both paths. Writing both makes it consume them on
+	// consecutive frames and issue two FakeTriggerWord calls, leaving engine's
+	// trigger response stuck until its ~23s ForceClear timeout.
+	return os.WriteFile(RelistenFlagPath, []byte("1"), 0644)
 }
 
 // ArmStreamWithSilencePrime prepares PCM with silence prime + head pad, THEN raises

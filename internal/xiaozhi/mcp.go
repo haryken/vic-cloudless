@@ -388,7 +388,11 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 			text = `{"error":"vision Explain URL not configured — Xiaozhi server did not send capabilities.vision"}`
 			log.Println("[Xiaozhi] MCP analyze_photo failed: no vision URL")
 		} else {
-			result, err := AnalyzeScene(context.Background(), question)
+			// Bound the complete camera + upload tool call. A dead engine camera
+			// response must not leave single-flight/playback state stuck forever.
+			analyzeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			result, err := AnalyzeScene(analyzeCtx, question)
+			cancel()
 			if err != nil {
 				isError = true
 				text = fmt.Sprintf(`{"error":%q}`, err.Error())
@@ -421,13 +425,13 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 		"self.caro.get_state", "self.connect4.get_state",
 		"self.reversi.get_state", "self.checkers.get_state", "self.go9.get_state":
 		path := map[string]string{
-			"self.chess.get_state":     "/api/mods/Chess/state",
-			"self.xiangqi.get_state":   "/api/mods/Xiangqi/state",
-			"self.caro.get_state":      "/api/mods/Caro/state",
-			"self.connect4.get_state":  "/api/mods/Connect4/state",
-			"self.reversi.get_state":   "/api/mods/Reversi/state",
-			"self.checkers.get_state":  "/api/mods/Checkers/state",
-			"self.go9.get_state":       "/api/mods/Go9/state",
+			"self.chess.get_state":    "/api/mods/Chess/state",
+			"self.xiangqi.get_state":  "/api/mods/Xiangqi/state",
+			"self.caro.get_state":     "/api/mods/Caro/state",
+			"self.connect4.get_state": "/api/mods/Connect4/state",
+			"self.reversi.get_state":  "/api/mods/Reversi/state",
+			"self.checkers.get_state": "/api/mods/Checkers/state",
+			"self.go9.get_state":      "/api/mods/Go9/state",
 		}[toolName]
 		body, err := fetchWiredChess(path)
 		if err != nil {
@@ -443,13 +447,13 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 		"self.caro.summarize", "self.connect4.summarize",
 		"self.reversi.summarize", "self.checkers.summarize", "self.go9.summarize":
 		path := map[string]string{
-			"self.chess.summarize":     "/api/mods/Chess/summary",
-			"self.xiangqi.summarize":   "/api/mods/Xiangqi/summary",
-			"self.caro.summarize":      "/api/mods/Caro/summary",
-			"self.connect4.summarize":  "/api/mods/Connect4/summary",
-			"self.reversi.summarize":   "/api/mods/Reversi/summary",
-			"self.checkers.summarize":  "/api/mods/Checkers/summary",
-			"self.go9.summarize":       "/api/mods/Go9/summary",
+			"self.chess.summarize":    "/api/mods/Chess/summary",
+			"self.xiangqi.summarize":  "/api/mods/Xiangqi/summary",
+			"self.caro.summarize":     "/api/mods/Caro/summary",
+			"self.connect4.summarize": "/api/mods/Connect4/summary",
+			"self.reversi.summarize":  "/api/mods/Reversi/summary",
+			"self.checkers.summarize": "/api/mods/Checkers/summary",
+			"self.go9.summarize":      "/api/mods/Go9/summary",
 		}[toolName]
 		body, err := fetchWiredChess(path)
 		if err != nil {
