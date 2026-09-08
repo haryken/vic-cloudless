@@ -30,9 +30,9 @@ const (
 	// Balanced window for 426MB Vector (2026-07-15 mitigate pack):
 	// Between old ~8s/40k portal (LMK risk) and trial ~4s/20k (ALSA underrun/SIGILL).
 	// Still streams long audio via punch+throttle; soft-capped in turn.go (~100s).
-	pcmWindowAheadBytes      = 192 * 1024      // ~6s @ 16kHz s16le
-	pcmPunchKeepBytes        = 48 * 1024       // ~1.5s cushion
-	pcmHardCapBytes          = 1024 * 1024     // ~32s unpunched live
+	pcmWindowAheadBytes = 192 * 1024 // ~6s @ 16kHz s16le
+	pcmPunchKeepBytes   = 48 * 1024  // ~1.5s cushion
+	pcmHardCapBytes          = 1024 * 1024 // ~32s unpunched live
 	pcmHardCapPunchFailBytes = 3 * 1024 * 1024 // ~96s if punch unsupported
 
 	SilencePrimeChunkBytes = 1024
@@ -58,9 +58,6 @@ var (
 	// ExternalAudio) but turn.go's streamStarted may still be true if no Opus
 	// arrived during suspend — analysis TTS then appends with no player.
 	playbackForceRearm atomic.Bool
-	// postCaptureGen bumps on Abandon so a late AnalyzeScene Resume cannot
-	// re-arm camera-wait flags on a newer listen (silent TTS hang).
-	postCaptureGen atomic.Uint64
 )
 
 func clearStreamFlags() {
@@ -161,9 +158,7 @@ func playbackBusyFile() bool {
 
 // SuspendPlaybackForCapture soft-ends intro ASAP so tools/call finishes before
 // the Xiaozhi server notifications/cancelled timeout (~10s).
-// Returned gen must be passed to ResumePlaybackAfterCapture.
-func SuspendPlaybackForCapture() uint64 {
-	gen := postCaptureGen.Load()
+func SuspendPlaybackForCapture() {
 	awaitPostCaptureStream.Store(false)
 	postCaptureToolDone.Store(false)
 	postCaptureToolDoneNano.Store(0)
@@ -194,7 +189,6 @@ func SuspendPlaybackForCapture() uint64 {
 	SetPlaying(false)
 	playbackForceRearm.Store(true)
 	time.Sleep(50 * time.Millisecond)
-	return gen
 }
 
 // ConsumePlaybackForceRearm is true once after camera suspend so turn.go
@@ -205,11 +199,7 @@ func ConsumePlaybackForceRearm() bool {
 
 // ResumePlaybackAfterCapture frees the speaker; Opus stays dropped until the
 // MCP tool reply is ready, then turn.go streams analysis TTS (no oneshot).
-func ResumePlaybackAfterCapture(gen uint64) {
-	if postCaptureGen.Load() != gen {
-		log.Println("[Xiaozhi] analyze_photo: skip resume — await abandoned for a newer listen")
-		return
-	}
+func ResumePlaybackAfterCapture() {
 	ClearCancelFlags()
 	CleanupPlaybackFiles()
 	streamSuspend.Store(false)
@@ -249,21 +239,15 @@ func PostCaptureToolDone() bool {
 // IgnorePrematureTTSStop ignores intro/stop until analysis playback is armed.
 // Must stay true after MarkPostCaptureToolDone: a late stop from Soft StreamEnd
 // otherwise ends the turn and analysis Opus never plays (silent hang).
-// Do NOT key off AnalyzeInFlight alone — a leftover capture goroutine from a
-// previous listen would mute TTS stop on the next conversation (no audio).
 func IgnorePrematureTTSStop() bool {
-	if streamSuspend.Load() && AnalyzeInFlight() {
-		return true
-	}
-	return awaitPostCaptureStream.Load()
+	return streamSuspend.Load() || awaitPostCaptureStream.Load()
 }
 
 // DropPostCaptureOpus drops Opus only while camera capture holds the speaker.
 // Do not gate on toolDone — analysis frames can arrive in the same instant as
 // sendResult returns and were dropped (silent hang after tool reply ready).
-// StreamSuspend leftover after the capture goroutine died must NOT mute a new listen.
 func DropPostCaptureOpus() bool {
-	return streamSuspend.Load() && AnalyzeInFlight()
+	return streamSuspend.Load()
 }
 
 // AwaitPostCaptureStream is true after camera until analysis stream is armed.
@@ -281,8 +265,6 @@ func ClearAwaitPostCaptureStream() {
 // AbandonPostCaptureAwait hard-clears post-camera wait so a hung analyze_photo
 // turn cannot leave speaker/busy/PCM state open and drain RAM into fault countdown.
 func AbandonPostCaptureAwait(reason string) {
-	had := streamSuspend.Load() || awaitPostCaptureStream.Load() || postCaptureToolDone.Load()
-	postCaptureGen.Add(1)
 	streamSuspend.Store(false)
 	awaitPostCaptureStream.Store(false)
 	postCaptureToolDone.Store(false)
@@ -293,9 +275,7 @@ func AbandonPostCaptureAwait(reason string) {
 	_ = os.Remove(BusyPath)
 	_ = os.Remove("/run/xiaozhi-busy")
 	SetPlaying(false)
-	if had {
-		log.Println("[Xiaozhi] analyze_photo: abandoned post-camera await —", reason)
-	}
+	log.Println("[Xiaozhi] analyze_photo: abandoned post-camera await —", reason)
 }
 
 // PostCaptureAwaitTimedOut reports hanging forever waiting for analysis audio.
@@ -315,7 +295,7 @@ func PostCaptureAwaitTimedOut(d time.Duration) bool {
 
 // StreamAppendSuspended is true while camera capture holds the speaker.
 func StreamAppendSuspended() bool {
-	return streamSuspend.Load() && AnalyzeInFlight()
+	return streamSuspend.Load()
 }
 
 // StreamAppend appends decoded 16kHz s16le PCM and maintains a sliding tmpfs window.
@@ -325,7 +305,7 @@ func StreamAppend(pcm []byte) (fileSize int64, err error) {
 		if len(pcm) == 0 {
 			return alsaBytesWritten(), nil
 		}
-		if StreamAppendSuspended() {
+		if streamSuspend.Load() {
 			return alsaBytesWritten(), nil
 		}
 		return alsaWrite(pcm)
@@ -333,7 +313,7 @@ func StreamAppend(pcm []byte) (fileSize int64, err error) {
 	if len(pcm) == 0 {
 		return PCMFileSize(), nil
 	}
-	if StreamAppendSuspended() {
+	if streamSuspend.Load() {
 		// Drop late intro/frames during camera — avoids fighting ALSA.
 		return PCMFileSize(), nil
 	}
@@ -527,12 +507,6 @@ func TriggerRelisten() error {
 	if InBlackjackGameMode() {
 		return nil
 	}
-	if ServerEndedConversation() || !SessionAlive() {
-		DisarmRelistenPending()
-		log.Println("[Xiaozhi] skip relisten — server ended WSS")
-		return ErrSkipRelisten
-	}
-	ArmContinuousRelisten()
 	DisarmRelistenPending()
 	if err := os.WriteFile(RelistenFlagPath, []byte("1"), 0644); err != nil {
 		return err

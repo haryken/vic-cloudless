@@ -217,11 +217,6 @@ func (strm *Streamer) runXiaozhiTurn() {
 			log.Println("[Xiaozhi] turn aborted (barge-in)")
 			return
 		}
-		if errors.Is(err, xiaozhi.ErrConversationEnded) {
-			xiaozhi.DisarmRelistenPending()
-			log.Println("[Xiaozhi] conversation ended by server — mic closed until Hey Vector / button")
-			return
-		}
 		log.Println("[Xiaozhi] turn error:", err)
 		// Stuck listen (cloud open, anim never streamed mic): kick another FakeTrigger.
 		errText := err.Error()
@@ -249,21 +244,9 @@ func (strm *Streamer) runXiaozhiTurn() {
 				log.Println("[Xiaozhi] silence after listen — mic closed until Hey Vector / button")
 			}
 		}
-		// intent_system_noaudio often consumes respOnce first so the engine drops
-		// the listen UI before STT finishes. process.go keeps that Vector stream
-		// open for a late MCP intent — if STT then fails, a respOnce-guarded
-		// OnError is a no-op and the stream stays open forever (mic_sock EAGAIN,
-		// Hey Vector face with no Xiaozhi turn). Always release the process stream.
-		sent := false
 		strm.respOnce.Do(func() {
 			strm.receiver.OnError(cloud.ErrorType_Server, err)
-			sent = true
 		})
-		if !sent {
-			log.Println("[Xiaozhi] turn error after noaudio — forcing process stream release")
-			strm.receiver.OnError(cloud.ErrorType_Server,
-				fmt.Errorf("stream release after noaudio: %v", err))
-		}
 		return
 	}
 
@@ -360,7 +343,7 @@ func (strm *Streamer) runXiaozhiTurn() {
 	if result.StreamedAudio {
 		// Server bye closes WSS (log: closed WSS session … turn_end). That is the
 		// flag: if session is gone, do not continuous-relisten / reopen mic.
-		if result.EndConversation || xiaozhi.ServerEndedConversation() || !xiaozhi.SessionAlive() {
+		if result.EndConversation || !xiaozhi.SessionAlive() {
 			xiaozhi.DisarmRelistenPending()
 			log.Println("[Xiaozhi] WSS closed — mic closed until Hey Vector / button (no auto-relisten)")
 			xiaozhi.ClearPendingMCPIntent("wss closed")
@@ -376,16 +359,14 @@ func (strm *Streamer) runXiaozhiTurn() {
 			}
 			time.Sleep(350 * time.Millisecond)
 			// Re-check: idle/goodbye may have closed WSS while we waited for speaker.
-			if result.EndConversation || xiaozhi.ServerEndedConversation() || !xiaozhi.SessionAlive() {
+			if !xiaozhi.SessionAlive() {
 				xiaozhi.DisarmRelistenPending()
 				log.Println("[Xiaozhi] WSS closed during playback wait — skip relisten")
 				xiaozhi.ClearPendingMCPIntent("wss closed after playback")
 				return
 			}
 			if err := xiaozhi.TriggerRelisten(); err != nil {
-				if !errors.Is(err, xiaozhi.ErrSkipRelisten) {
-					log.Println("[Xiaozhi] relisten trigger:", err)
-				}
+				log.Println("[Xiaozhi] relisten trigger:", err)
 			} else {
 				xiaozhi.ClearReopenMicAfterBlackjack()
 				log.Println("[Xiaozhi][Mic] relisten after playback")
@@ -428,14 +409,12 @@ func (strm *Streamer) runXiaozhiTurn() {
 				log.Printf("[Xiaozhi] ExternalAudio play flag set (+%v)",
 					time.Since(playStart).Round(time.Millisecond))
 				_ = xiaozhi.WaitPlaybackIdle(len(allPCM), playStart, 120*time.Second)
-				if result.EndConversation || xiaozhi.ServerEndedConversation() || !xiaozhi.SessionAlive() {
+				if result.EndConversation || !xiaozhi.SessionAlive() {
 					xiaozhi.DisarmRelistenPending()
 					log.Println("[Xiaozhi] WSS closed after one-shot — no relisten")
 				} else if xiaozhi.ContinuousMode() && !xiaozhi.InBlackjackGameMode() {
 					if err := xiaozhi.TriggerRelisten(); err != nil {
-						if !errors.Is(err, xiaozhi.ErrSkipRelisten) {
-							log.Println("[Xiaozhi] relisten after one-shot:", err)
-						}
+						log.Println("[Xiaozhi] relisten after one-shot:", err)
 					} else {
 						xiaozhi.ClearReopenMicAfterBlackjack()
 					}

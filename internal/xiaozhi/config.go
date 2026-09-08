@@ -26,8 +26,7 @@ type Config struct {
 	SessionIdleSec        int    `json:"session_idle_sec"`
 	TTSMode               string `json:"tts_mode"`
 	GameGoogleTTSVI       bool   `json:"game_google_tts_vi"`
-	// GameGoogleTTSLang is Google Translate TTS language code (vi default).
-	GameGoogleTTSLang string `json:"game_google_tts_lang,omitempty"`
+	GameGoogleTTSLang     string `json:"game_google_tts_lang,omitempty"`
 	// IdentityMode: "vi_pool" = shared Vietnamese preset (rotate MAC/UUID on boot);
 	// "custom" = user-paired xiaozhi.me device.
 	IdentityMode string `json:"identity_mode,omitempty"`
@@ -35,7 +34,7 @@ type Config struct {
 
 func defaultConfig() Config {
 	return Config{
-		Enabled:               true,
+		Enabled:               false,
 		OTABaseURL:            "https://api.tenclass.net/",
 		Endpoint:              "wss://api.tenclass.net/xiaozhi/v1/",
 		ProtocolVersion:       1,
@@ -44,9 +43,6 @@ func defaultConfig() Config {
 		IdleTimeoutSec:        20,
 		SessionIdleSec:        30,
 		TTSMode:               "xiaozhi",
-		GameGoogleTTSVI:       true,
-		GameGoogleTTSLang:     "vi",
-		IdentityMode:          "vi_pool",
 	}
 }
 
@@ -81,10 +77,6 @@ func LoadConfig() Config {
 	}
 	if cfg.ProtocolVersion == 0 {
 		cfg.ProtocolVersion = 1
-	}
-	cfg.GameGoogleTTSVI = true
-	if cfg.GameGoogleTTSLang == "" {
-		cfg.GameGoogleTTSLang = "vi"
 	}
 	globalCfg = cfg
 	return cfg
