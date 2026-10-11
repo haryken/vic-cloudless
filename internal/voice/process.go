@@ -237,6 +237,10 @@ procloop:
 				}
 
 				chipperOpts := p.defaultChipperOptions()
+				// Same condition vic-anim uses to lift its mic window (Normal streams only).
+				if xiaozhi.Enabled() && mode == cloud.StreamType_Normal && xiaozhi.ListenVADActive() {
+					chipperOpts.Timeout = xiaozhi.VADStreamTimeout
+				}
 				chipperOpts.SaveAudio = p.opts.saveAudio
 				chipperOpts.Language = language
 				chipperOpts.NoDas = hw.NoLogging

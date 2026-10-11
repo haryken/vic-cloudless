@@ -217,6 +217,16 @@ func (strm *Streamer) runXiaozhiTurn() {
 			log.Println("[Xiaozhi] turn aborted (barge-in)")
 			return
 		}
+		if errors.Is(err, xiaozhi.ErrNoSpeech) {
+			log.Println("[Xiaozhi][VAD] nobody spoke — mic closed until Hey Vector / button")
+			strm.respOnce.Do(func() {
+				strm.receiver.OnIntent(&cloud.IntentResult{
+					Intent:     "intent_system_noaudio",
+					Parameters: "{}",
+				})
+			})
+			return
+		}
 		log.Println("[Xiaozhi] turn error:", err)
 		// Stuck listen (cloud open, anim never streamed mic): kick another FakeTrigger.
 		errText := err.Error()

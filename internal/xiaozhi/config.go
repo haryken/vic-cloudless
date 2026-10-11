@@ -27,6 +27,9 @@ type Config struct {
 	TTSMode               string `json:"tts_mode"`
 	GameGoogleTTSVI       bool   `json:"game_google_tts_vi"`
 	GameGoogleTTSLang     string `json:"game_google_tts_lang,omitempty"`
+	// ListenMode: "fixed" (default) = Vector's ~6s mic window; "vad" = keep the
+	// mic open until the server returns STT (see listen_vad.go).
+	ListenMode string `json:"listen_mode,omitempty"`
 	// IdentityMode: "vi_pool" = shared Vietnamese preset (rotate MAC/UUID on boot);
 	// "custom" = user-paired xiaozhi.me device.
 	IdentityMode string `json:"identity_mode,omitempty"`
@@ -82,6 +85,7 @@ func LoadConfig() Config {
 		cfg.ProtocolVersion = 1
 	}
 	globalCfg = cfg
+	SyncListenVADFlag(cfg)
 	return cfg
 }
 
@@ -107,6 +111,7 @@ func SaveConfig(cfg Config) error {
 	globalCfgMu.Lock()
 	globalCfg = cfg
 	globalCfgMu.Unlock()
+	SyncListenVADFlag(cfg)
 	return nil
 }
 

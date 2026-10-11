@@ -120,77 +120,18 @@ func RunTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 		idleTimeout = 5 * time.Second
 	}
 
-	// Accumulate opus-encoding buffer (we need EncFrameSamples*2 bytes per frame).
-	encBuf := make([]byte, 0, EncFrameSamples*2*4)
-	audioSendCount := 0
-	// If FakeTrigger opened cloud-listen but anim never streams mic, do not hang forever.
-	var micWaitDeadline <-chan time.Time = time.After(12 * time.Second)
-	listenStartAt := time.Now()
-
-streamLoop:
-	for {
-		select {
-		case chunk, ok := <-audioStream:
-			if !ok {
-				MarkMicListenEnded()
-				break streamLoop
-			}
-			if encErr != nil || enc == nil {
-				// No opus encoder — send raw PCM as a fallback note; server will see silence.
-				// This path only happens in non-vicos builds (dev).
-				continue
-			}
-			encBuf = append(encBuf, chunk...)
-			// Drain complete Opus frames from buffer.
-			for len(encBuf) >= EncFrameSamples*2 {
-				frame := encBuf[:EncFrameSamples*2]
-				encBuf = encBuf[EncFrameSamples*2:]
-				opusFrame, err := enc.EncodeFrame(frame)
-				if err != nil {
-					log.Println("[Xiaozhi] encode error:", err)
-					continue
-				}
-				if serr := client.SendAudio(opusFrame); serr != nil {
-					log.Println("[Xiaozhi] send audio error:", serr)
-					InvalidateSession("send_audio_failed")
-					forceClose = true
-					return nil, fmt.Errorf("send audio: %w", serr)
-				}
-				audioSendCount++
-				if audioSendCount == 1 {
-					MarkMicUplink()
-					log.Printf("[Xiaozhi][Mic] first uplink frame (+%v after ListenStart)",
-						time.Since(listenStartAt).Round(time.Millisecond))
-				}
-			}
-		// Do NOT drain TTS/LLM/Audio here. Tenclass often starts TTS as soon as STT
-		// is ready — while mic uplink is still running. Discarding = missing head.
-		case <-micWaitDeadline:
-			if audioSendCount == 0 {
-				log.Printf("[Xiaozhi] no mic audio for %v after listen start — aborting stuck listen",
-					time.Since(listenStartAt).Round(time.Millisecond))
-				forceClose = false
-				return nil, fmt.Errorf("no mic uplink after listen start")
-			}
-			// Uplink already alive; disable further mic-wait wakes by draining to nil channel.
-			micWaitDeadline = nil
-		case err := <-client.ErrCh():
-			forceClose = true
-			return nil, fmt.Errorf("WSS died during listen: %w", err)
-		case <-turnCtx.Done():
-			if turnCtx.Err() == context.Canceled {
-				return nil, ErrAborted
-			}
-			return nil, turnCtx.Err()
-		}
+	var capture micCapture
+	var capErr error
+	if VADListenMode(cfg) {
+		capture, capErr = captureVAD(turnCtx, client, audioStream, enc, encErr)
+	} else {
+		capture, capErr = captureFixed(turnCtx, client, audioStream, enc, encErr)
 	}
-
-	if err := client.ListenStop(); err != nil {
-		log.Println("[Xiaozhi] listen stop error:", err)
+	if capErr != nil {
+		forceClose = capture.forceClose
+		return nil, capErr
 	}
-	MarkMicListenEnded()
-	listenDur := time.Since(listenStartAt).Round(time.Millisecond)
-	log.Printf("[Xiaozhi][Mic] ListenStop — sent %d opus frames, uplink %v", audioSendCount, listenDur)
+	audioSendCount := capture.frames
 
 	// Beat engine Intent timeout (NoCloud) as soon as mic closes — Xiaozhi STT
 	// continues on WSS independently of the Vector cloud stream.

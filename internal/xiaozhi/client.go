@@ -268,6 +268,14 @@ func (c *Client) SendGoodbye() error {
 // STTCh returns the channel for STT text results from the server.
 func (c *Client) STTCh() <-chan string { return c.sttCh }
 
+// requeueSTT puts back an STT result that was read while the mic was still open.
+func (c *Client) requeueSTT(text string) {
+	select {
+	case c.sttCh <- text:
+	default:
+	}
+}
+
 // TTSCh returns the channel for TTS state/sentence events.
 func (c *Client) TTSCh() <-chan ServerMessage { return c.ttsCh }
 
