@@ -43,6 +43,17 @@ type TurnResult struct {
 // afterSTT, if non-nil, is called once STT text is available (before TTS wait) so the
 // caller can close the Vector listening UI before the engine's ~10s stream timeout.
 func RunTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterSTT func(stt string)) (*TurnResult, error) {
+	return runTurn(ctx, audioStream, cfg, afterSTT, "")
+}
+
+// RunDetectTurn opens (or reuses) the session, sends a wake-style
+// listen/detect with text instead of mic audio, and streams the reply TTS.
+// No engine listen is involved, so the caller handles relisten afterwards.
+func RunDetectTurn(cfg Config, text string) (*TurnResult, error) {
+	return runTurn(context.Background(), nil, cfg, nil, text)
+}
+
+func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterSTT func(stt string), detectText string) (*TurnResult, error) {
 	// Own budget for dial/STT/TTS. Mic end is signalled by audioStream closing
 	// (CloseSend→micDone). Barge-in cancels turnCtx via BindTurn only —
 	// do NOT tie turnCancel to strm.ctx: afterSTT→OnIntent closes the streamer
@@ -54,6 +65,17 @@ func RunTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	keepSession := ContinuousMode()
 	forceClose := false
 	endConversation := false
+
+	if detectText == "" {
+		// Any new listen owns the speaker (also covers wakes not seen as hotword).
+		StopMusic("new listen")
+	}
+
+	// tools/list is answered once per session: drop it if the music source
+	// changed so the server sees (or stops seeing) self.music.play.
+	if mcp := SessionMCP(); mcp != nil && mcp.ToolsListed() && mcp.MusicToolsListed() != MusicToolsEnabled(cfg) {
+		InvalidateSession("music_source_changed")
+	}
 
 	// Reuse persistent WSS in continuous mode (ESP32-style same session_id).
 	client, err := EnsureConnected(turnCtx, cfg)
@@ -98,84 +120,103 @@ func RunTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	enc, encErr := NewEncoder()
 	dec, decErr := NewDecoder()
 
-	// --- Phase 1: stream mic audio to server ---
-	if err := client.ListenStart(); err != nil {
-		log.Println("[Xiaozhi] listen start failed, redialing:", err)
-		InvalidateSession("listen_start_failed")
-		client, err = EnsureConnected(turnCtx, cfg)
-		if err != nil {
-			forceClose = true
-			return nil, fmt.Errorf("xiaozhi redial: %w", err)
-		}
-		log.Println("[Xiaozhi] listen round on session:", client.SessionID(), "persistent:", keepSession, "(after redial)")
-		if err := client.ListenStart(); err != nil {
-			forceClose = true
-			return nil, fmt.Errorf("listen start: %w", err)
-		}
-	}
-	log.Println("[Xiaozhi][Mic] ListenStart OK — waiting for anim uplink")
-
-	idleTimeout := time.Duration(cfg.IdleTimeoutSec) * time.Second
-	if idleTimeout < 5*time.Second {
-		idleTimeout = 5 * time.Second
-	}
-
-	var capture micCapture
-	var capErr error
-	if VADListenMode(cfg) {
-		capture, capErr = captureVAD(turnCtx, client, audioStream, enc, encErr)
-	} else {
-		capture, capErr = captureFixed(turnCtx, client, audioStream, enc, encErr)
-	}
-	if capErr != nil {
-		forceClose = capture.forceClose
-		return nil, capErr
-	}
-	audioSendCount := capture.frames
-
-	// Beat engine Intent timeout (NoCloud) as soon as mic closes — Xiaozhi STT
-	// continues on WSS independently of the Vector cloud stream.
-	if afterSTT != nil {
-		afterSTT("")
-	}
-
-	// --- Phase 2: wait for STT ---
-	// Short utterance / silence after FakeTrigger: don't hang 30s on NoCloud.
-	sttTimeout := idleTimeout + 10*time.Second
-	if audioSendCount < 150 {
-		sttTimeout = 8 * time.Second
-	}
 	var sttText string
-	sttTimer := time.NewTimer(sttTimeout)
-	defer sttTimer.Stop()
-	sttWaitStart := time.Now()
-	log.Printf("[Xiaozhi][Mic] waiting for STT (sent %d frames, timeout %v)", audioSendCount, sttTimeout)
-sttWait:
-	for {
-		select {
-		case sttText = <-client.STTCh():
-			log.Printf("[Xiaozhi][Mic] STT ok (+%v wait): %q",
-				time.Since(sttWaitStart).Round(time.Millisecond), sttText)
-			break sttWait
-		// Do NOT drain TTS/LLM/Audio while waiting for STT — server may already be
-		// streaming the reply (see TRACE: binary #1..N before "waiting for STT").
-		case err := <-client.ErrCh():
-			return nil, fmt.Errorf("waiting for STT: %w", err)
-		case <-sttTimer.C:
-			log.Printf("[Xiaozhi][Mic] STT timeout after %v (sent %d frames)",
-				time.Since(sttWaitStart).Round(time.Millisecond), audioSendCount)
-			return nil, fmt.Errorf("timeout waiting for STT (sent %d frames)", audioSendCount)
-		case <-turnCtx.Done():
-			if turnCtx.Err() == context.Canceled {
-				return nil, ErrAborted
+	if detectText != "" {
+		// Detect turn: the text stands in for the user's utterance.
+		sttText = detectText
+		if err := client.SendWakeDetect(detectText); err != nil {
+			log.Println("[Xiaozhi] listen detect failed, redialing:", err)
+			InvalidateSession("listen_detect_failed")
+			client, err = EnsureConnected(turnCtx, cfg)
+			if err != nil {
+				forceClose = true
+				return nil, fmt.Errorf("xiaozhi redial: %w", err)
 			}
-			return nil, turnCtx.Err()
+			if err := client.SendWakeDetect(detectText); err != nil {
+				forceClose = true
+				return nil, fmt.Errorf("listen detect: %w", err)
+			}
 		}
-	}
+		log.Printf("[Xiaozhi] listen detect %q sent; session: %s", detectText, client.SessionID())
+	} else {
+		// --- Phase 1: stream mic audio to server ---
+		if err := client.ListenStart(); err != nil {
+			log.Println("[Xiaozhi] listen start failed, redialing:", err)
+			InvalidateSession("listen_start_failed")
+			client, err = EnsureConnected(turnCtx, cfg)
+			if err != nil {
+				forceClose = true
+				return nil, fmt.Errorf("xiaozhi redial: %w", err)
+			}
+			log.Println("[Xiaozhi] listen round on session:", client.SessionID(), "persistent:", keepSession, "(after redial)")
+			if err := client.ListenStart(); err != nil {
+				forceClose = true
+				return nil, fmt.Errorf("listen start: %w", err)
+			}
+		}
+		log.Println("[Xiaozhi][Mic] ListenStart OK — waiting for anim uplink")
 
-	if sttText == "" {
-		log.Println("[Xiaozhi][Mic] STT empty string from server")
-		return nil, fmt.Errorf("empty STT result")
+		idleTimeout := time.Duration(cfg.IdleTimeoutSec) * time.Second
+		if idleTimeout < 5*time.Second {
+			idleTimeout = 5 * time.Second
+		}
+
+		var capture micCapture
+		var capErr error
+		if VADListenMode(cfg) {
+			capture, capErr = captureVAD(turnCtx, client, audioStream, enc, encErr)
+		} else {
+			capture, capErr = captureFixed(turnCtx, client, audioStream, enc, encErr)
+		}
+		if capErr != nil {
+			forceClose = capture.forceClose
+			return nil, capErr
+		}
+		audioSendCount := capture.frames
+
+		// Beat engine Intent timeout (NoCloud) as soon as mic closes — Xiaozhi STT
+		// continues on WSS independently of the Vector cloud stream.
+		if afterSTT != nil {
+			afterSTT("")
+		}
+
+		// --- Phase 2: wait for STT ---
+		// Short utterance / silence after FakeTrigger: don't hang 30s on NoCloud.
+		sttTimeout := idleTimeout + 10*time.Second
+		if audioSendCount < 150 {
+			sttTimeout = 8 * time.Second
+		}
+		sttTimer := time.NewTimer(sttTimeout)
+		defer sttTimer.Stop()
+		sttWaitStart := time.Now()
+		log.Printf("[Xiaozhi][Mic] waiting for STT (sent %d frames, timeout %v)", audioSendCount, sttTimeout)
+	sttWait:
+		for {
+			select {
+			case sttText = <-client.STTCh():
+				log.Printf("[Xiaozhi][Mic] STT ok (+%v wait): %q",
+					time.Since(sttWaitStart).Round(time.Millisecond), sttText)
+				break sttWait
+			// Do NOT drain TTS/LLM/Audio while waiting for STT — server may already be
+			// streaming the reply (see TRACE: binary #1..N before "waiting for STT").
+			case err := <-client.ErrCh():
+				return nil, fmt.Errorf("waiting for STT: %w", err)
+			case <-sttTimer.C:
+				log.Printf("[Xiaozhi][Mic] STT timeout after %v (sent %d frames)",
+					time.Since(sttWaitStart).Round(time.Millisecond), audioSendCount)
+				return nil, fmt.Errorf("timeout waiting for STT (sent %d frames)", audioSendCount)
+			case <-turnCtx.Done():
+				if turnCtx.Err() == context.Canceled {
+					return nil, ErrAborted
+				}
+				return nil, turnCtx.Err()
+			}
+		}
+
+		if sttText == "" {
+			log.Println("[Xiaozhi][Mic] STT empty string from server")
+			return nil, fmt.Errorf("empty STT result")
+		}
 	}
 
 	// Self-control is ESP32-style only: STT → LLM → tools/call (self.vector.*).
@@ -213,7 +254,9 @@ sttWait:
 	}
 
 	// --- Phase 3: send STT text unless server already ran tools for this utterance ---
-	if mcpBeforeSendText {
+	if detectText != "" {
+		// listen/detect already carries the text.
+	} else if mcpBeforeSendText {
 		log.Println("[Xiaozhi] skip SendText — server already issued MCP; waiting for TTS")
 	} else if err := client.SendText(sttText); err != nil {
 		return nil, fmt.Errorf("send text: %w", err)
@@ -355,6 +398,11 @@ sttWait:
 					log.Printf("[Xiaozhi][TTS] sentence #%d: %q", len(ttsSentences), ttsMsg.Text)
 				}
 			case TTSStateStop:
+				// The found/not-found reply comes after self.music.play returns.
+				if MusicToolInFlight() {
+					log.Println("[Xiaozhi][TTS] ignoring stop while self.music.play is searching")
+					continue
+				}
 				// Stale stop from a prior truncated TTS (arrived after SendText).
 				if audioFrames == 0 && !sawTTSStart {
 					log.Println("[Xiaozhi][TTS] ignoring stale stop (no start/audio yet)")
@@ -613,6 +661,11 @@ sttWait:
 					pendingRobotParams = params
 					log.Println("[Xiaozhi] MCP action queued during TTS (let confirmation finish):", intent)
 				}
+			}
+			// self.music.play blocks the server while it searches (up to ~10s);
+			// don't count that as the server going silent.
+			if MusicToolHoldsTurn(ttsIdleGap) {
+				continue
 			}
 			if !ttsStarted {
 				if time.Since(ttsPhaseStart) > ttsIdleGap {

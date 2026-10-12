@@ -30,6 +30,10 @@ type Config struct {
 	// ListenMode: "fixed" (default) = Vector's ~6s mic window; "vad" = keep the
 	// mic open until the server returns STT (see listen_vad.go).
 	ListenMode string `json:"listen_mode,omitempty"`
+	// MusicSource: "server" (default) leaves music to the Xiaozhi server;
+	// "youtube" lists self.music.play, which streams from MusicServerURL.
+	MusicSource    string `json:"music_source,omitempty"`
+	MusicServerURL string `json:"music_server_url,omitempty"`
 	// IdentityMode: "vi_pool" = shared Vietnamese preset (rotate MAC/UUID on boot);
 	// "custom" = user-paired xiaozhi.me device.
 	IdentityMode string `json:"identity_mode,omitempty"`

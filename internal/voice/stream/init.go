@@ -227,6 +227,15 @@ func (strm *Streamer) runXiaozhiTurn() {
 			})
 			return
 		}
+		if xiaozhi.StartPendingMusic("after turn error: " + err.Error()) {
+			strm.respOnce.Do(func() {
+				strm.receiver.OnIntent(&cloud.IntentResult{
+					Intent:     "intent_system_noaudio",
+					Parameters: "{}",
+				})
+			})
+			return
+		}
 		log.Println("[Xiaozhi] turn error:", err)
 		// Stuck listen (cloud open, anim never streamed mic): kick another FakeTrigger.
 		errText := err.Error()
@@ -280,6 +289,18 @@ func (strm *Streamer) runXiaozhiTurn() {
 			xiaozhi.ClearCancelFlags()
 			time.Sleep(250 * time.Millisecond)
 		}
+	}
+
+	// self.music.play found a song: its "found X" reply has been spoken, so
+	// close the WSS and play it (no relisten until the song ends).
+	if xiaozhi.StartPendingMusic("after TTS") {
+		strm.respOnce.Do(func() {
+			strm.receiver.OnIntent(&cloud.IntentResult{
+				Intent:     "intent_system_noaudio",
+				Parameters: "{}",
+			})
+		})
+		return
 	}
 
 	if result.RobotIntent != "" {

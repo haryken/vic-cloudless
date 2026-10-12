@@ -33,6 +33,7 @@ type MCPHandler struct {
 	initDone   bool
 	toolsDone  bool
 	toolsReady chan struct{} // closed when tools/list has been answered
+	musicTools bool          // self.music.* was in the tools/list reply
 }
 
 // NewMCPHandler creates an MCPHandler attached to the given client.
@@ -64,6 +65,13 @@ func (h *MCPHandler) ToolsListed() bool {
 	h.hsMu.Lock()
 	defer h.hsMu.Unlock()
 	return h.toolsDone
+}
+
+// MusicToolsListed reports whether the server was offered self.music.* tools.
+func (h *MCPHandler) MusicToolsListed() bool {
+	h.hsMu.Lock()
+	defer h.hsMu.Unlock()
+	return h.musicTools
 }
 
 // WaitToolsListed blocks until tools/list has been answered or ctx is done.
@@ -267,9 +275,16 @@ func (h *MCPHandler) HandleToolsList(msg ServerMessage) error {
 			"REQUIRED to summarize Go 9×9 / cờ vây. ALWAYS call before answering about that game.",
 			nil, nil),
 	}
+	musicTools := MusicToolsEnabled(GetConfig())
+	if musicTools {
+		tools = append(tools, musicToolDefs()...)
+	}
 	if err := h.sendResult(msg.ID, map[string]interface{}{"tools": tools}); err != nil {
 		return err
 	}
+	h.hsMu.Lock()
+	h.musicTools = musicTools
+	h.hsMu.Unlock()
 	h.markToolsDone()
 	log.Printf("[Xiaozhi] MCP ← tools/list → replied (%d tools)", len(tools))
 	return nil
@@ -476,6 +491,10 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 			isError = true
 			text = fmt.Sprintf(`{"error":"unknown action: %s"}`, action)
 		}
+
+	case musicPlayTool:
+		query, _ := args["query"].(string)
+		text, isError = handleMusicPlay(query)
 
 	// Backward-compatible alias from earlier builds.
 	case "self.vector.play_fistbump":

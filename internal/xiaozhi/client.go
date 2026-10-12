@@ -15,13 +15,13 @@ import (
 
 // Message types from server.
 const (
-	MsgTypeHello        = "hello"
-	MsgTypeTTS          = "tts"
-	MsgTypeLLM          = "llm"
-	MsgTypeSTT          = "stt"
-	MsgTypeMCP          = "mcp"
-	MsgTypeGoodbye      = "goodbye"
-	MsgTypeError        = "error"
+	MsgTypeHello   = "hello"
+	MsgTypeTTS     = "tts"
+	MsgTypeLLM     = "llm"
+	MsgTypeSTT     = "stt"
+	MsgTypeMCP     = "mcp"
+	MsgTypeGoodbye = "goodbye"
+	MsgTypeError   = "error"
 )
 
 // TTSState values.
@@ -83,12 +83,12 @@ func Dial(dialCtx context.Context, cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		cfg:       cfg,
-		conn:      conn,
-		sttCh:     make(chan string, 8),
+		cfg:   cfg,
+		conn:  conn,
+		sttCh: make(chan string, 8),
 		// Large TTS/LLM buffers: sentence_start floods must not drop (default: lose text).
-		ttsCh:     make(chan ServerMessage, 128),
-		llmCh:     make(chan ServerMessage, 128),
+		ttsCh: make(chan ServerMessage, 128),
+		llmCh: make(chan ServerMessage, 128),
 		// Deep enough that slow arm/pad must not drop head Opus (was 256 + silent drop).
 		audioCh:   make(chan []byte, 1024),
 		mcpCh:     make(chan ServerMessage, 16),
@@ -209,6 +209,17 @@ func (c *Client) ListenDetect(text string) error {
 		"text":       text,
 		"source":     "text",
 		"session_id": c.sessionID,
+	})
+}
+
+// SendWakeDetect sends the ESP32 wake-word style detect (no "source" field),
+// e.g. "phát hết nhạc" after device music so the server greets the user again.
+func (c *Client) SendWakeDetect(text string) error {
+	return c.writeJSON(map[string]interface{}{
+		"session_id": c.sessionID,
+		"type":       "listen",
+		"state":      "detect",
+		"text":       text,
 	})
 }
 

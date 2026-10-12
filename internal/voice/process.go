@@ -175,6 +175,11 @@ procloop:
 			case cloud.MessageTag_Hotword:
 				// hotword = get ready to stream data
 				if xiaozhi.Enabled() {
+					// Hey Vector during device music: stop the song (no "phát hết
+					// nhạc" detect) and fall through to a normal listen.
+					if xiaozhi.StopMusic("wake_word_detected") {
+						log.Println("[Xiaozhi][Music] stopped by wake word — new listen")
+					}
 					// Already mid-listen with mic flowing: ignore duplicate Hey Vector
 					// so we do not abort the utterance before STT completes.
 					// If listen started but mic never uplinked, do NOT ignore — restart.
