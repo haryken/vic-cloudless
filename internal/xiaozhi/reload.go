@@ -65,8 +65,8 @@ func applyConfigReload() {
 	noteConversation()
 	prev := GetConfig()
 	cfg := LoadConfig()
-	log.Printf("[Xiaozhi][Reload] applying: enabled %v→%v identity %q→%q device %s→%s",
-		prev.Enabled, cfg.Enabled, prev.IdentityMode, cfg.IdentityMode, prev.DeviceID, cfg.DeviceID)
+	log.Printf("[Xiaozhi][Reload] applying: enabled %v→%v backend %q→%q identity %q→%q device %s→%s",
+		prev.Enabled, cfg.Enabled, prev.Backend, cfg.Backend, prev.IdentityMode, cfg.IdentityMode, prev.DeviceID, cfg.DeviceID)
 
 	StopMusic("config reload")
 	InterruptTurn("config reload")
@@ -88,7 +88,7 @@ func applyConfigReload() {
 		runtime.GC()
 		debug.FreeOSMemory()
 	}
-	if cfg.DeviceID != "" && cfg.ClientID != "" {
+	if !IsDirectAPIBackend(cfg.Backend) && cfg.DeviceID != "" && cfg.ClientID != "" {
 		if err := OtaCheck(&cfg); err != nil {
 			log.Println("[Xiaozhi][Reload] OTA check:", err)
 		}

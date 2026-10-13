@@ -63,30 +63,31 @@ func RotateCourseIdentity(cfg *Config) {
 // courseToolsEnabled: the course tools are listed only for course identities.
 func courseToolsEnabled(cfg Config) bool { return IsCourse(cfg) }
 
-// Tool names follow ubt_speech_demo (self.otto.*) because the teaching agents
-// bound to these MAC pools were written against them; self.mini.* / self.vector.*
-// aliases are accepted on call.
+// Tool names and descriptions match xiaozhi-esp32 otto-robot (otto_controller.cc)
+// because the teaching agents bound to these MAC pools were written against
+// them. self.mini.* / self.vector.* prefixes and the older shift_unit are
+// still accepted on call.
 const (
 	toolStudentInfo = "self.otto.get_student_info"
-	toolShiftUnit   = "self.otto.shift_unit"
+	toolNextUnit    = "self.otto.next_unit"
+	toolPrevUnit    = "self.otto.prev_unit"
 )
 
 func courseToolDefs() []map[string]interface{} {
 	return []map[string]interface{}{
 		toolDef(toolStudentInfo,
-			"Trả thông tin học viên / khóa học / sách / unit đang học / Device-Id. Dùng khi hỏi 'tao là ai / đang học gì / học bài nào', và trước khi bắt đầu dạy.",
+			"Lấy tên học viên và unit đang học. Dùng khi hỏi 'tao là ai', 'đang học unit gì'.",
 			nil, nil),
-		toolDef(toolShiftUnit,
-			"Chọn unit tiếp theo hoặc unit trước trong khóa + sách đang học. "+
-				"Dùng khi nói 'unit tiếp theo', 'bài tiếp theo', 'unit trước', 'bài trước'. "+
-				"Hết unit thì sang sách kế tiếp nếu có. Trả lời ngắn tên unit.",
-			map[string]interface{}{
-				"direction": map[string]interface{}{
-					"type":        "string",
-					"description": "next | prev",
-				},
-			},
-			[]string{"direction"}),
+		toolDef(toolNextUnit,
+			"Chuyển sang UNIT TIẾP THEO trong sách/khóa hiện tại và LƯU vào robot (Self-Control web cũng thấy). "+
+				"Dùng khi người dùng nói: 'unit tiếp theo', 'học unit sau', 'next unit', 'chuyển unit kế'. "+
+				"Trả về unit_name mới — hãy dạy tiếp unit đó.",
+			nil, nil),
+		toolDef(toolPrevUnit,
+			"Chuyển sang UNIT TRƯỚC ĐÓ trong sách/khóa hiện tại và LƯU vào robot (Self-Control web cũng thấy). "+
+				"Dùng khi người dùng nói: 'unit trước', 'unit trước đó', 'previous unit', 'lui unit'. "+
+				"Trả về unit_name mới — hãy dạy tiếp unit đó.",
+			nil, nil),
 	}
 }
 
@@ -122,6 +123,7 @@ func studentInfoJSON(cfg Config) string {
 		"voice":        c.Voices[s.Voice].Label,
 		"device_id":    cfg.DeviceID,
 		"sub_idx":      s.Book,
+		"unit_index":   s.Unit,
 		"units":        strconv.Itoa(s.Unit),
 		"unit_names":   course.UnitName(s),
 	}
@@ -166,6 +168,7 @@ func handleCourseTool(kind string, args map[string]interface{}) (string, bool) {
 		"message":    msg,
 		"course_idx": after.Idx,
 		"sub_idx":    after.Book,
+		"unit_index": after.Unit,
 		"unit_idx":   after.Unit,
 		"unit_name":  course.UnitName(after),
 		"clamped":    clamped,

@@ -112,17 +112,19 @@ func CloseSession() {
 	sess.mu.Lock()
 	closeSessionLocked("manual")
 	sess.mu.Unlock()
+	oaiCloseSession("manual")
 }
 
 // InvalidateSession drops a dead/broken WSS without waiting for idle.
 // Next EnsureConnected will Dial a fresh session.
 func InvalidateSession(reason string) {
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
 	if reason == "" {
 		reason = "dead"
 	}
+	sess.mu.Lock()
 	closeSessionLocked(reason)
+	sess.mu.Unlock()
+	oaiCloseSession(reason)
 }
 
 func closeSessionLocked(reason string) {
@@ -572,7 +574,7 @@ func ActiveSessionID() string {
 // After server bye / turn_end close, this is false — continuous mode must NOT
 // FakeTrigger (that would open mic and dial a new WebSocket).
 func SessionAlive() bool {
-	return ActiveSessionID() != ""
+	return ActiveSessionID() != "" || oaiSessionAlive()
 }
 
 // BargeIn interrupts the current Xiaozhi turn/playback like xiaozhi-esp32 AbortSpeaking:

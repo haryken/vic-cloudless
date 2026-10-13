@@ -3,6 +3,7 @@ package listenvad
 import (
 	"encoding/binary"
 	"math"
+	"time"
 )
 
 const (
@@ -18,6 +19,11 @@ const (
 	gateFloorRise = 1.002
 	// ~160ms of net voiced frames.
 	gateHotFrames = 8
+	// After speech started, a frame above this (vs floor) still counts as
+	// talking for end-of-speech; lower than the start ratio so soft word
+	// endings do not read as silence.
+	gateTalkFloorRatio = 2.5
+	gateTalkMinRMS     = 150.0
 )
 
 // SpeechGate answers "has anyone started talking" for 16kHz s16le mono PCM.
@@ -30,6 +36,8 @@ type SpeechGate struct {
 	peak    float64
 	hot     int
 	started bool
+	// quiet counts consecutive non-talking samples since speech started.
+	quiet int
 }
 
 func NewSpeechGate() *SpeechGate {
@@ -49,6 +57,15 @@ func (g *SpeechGate) Started() bool  { return g.started }
 func (g *SpeechGate) Floor() float64 { return g.floor }
 func (g *SpeechGate) Peak() float64  { return g.peak }
 
+// SilenceAfterSpeech is how long the input has been quiet since speech
+// started (0 before speech or while talking).
+func (g *SpeechGate) SilenceAfterSpeech() time.Duration {
+	if !g.started {
+		return 0
+	}
+	return time.Duration(g.quiet) * time.Second / gateSampleRate
+}
+
 func (g *SpeechGate) frame(b []byte) {
 	var sum float64
 	count := len(b) / 2
@@ -65,7 +82,15 @@ func (g *SpeechGate) frame(b []byte) {
 		g.floor *= gateFloorRise
 	}
 
-	if g.started || g.samples <= gateIgnoreHeadSamples {
+	if g.started {
+		if rms > math.Max(g.floor*gateTalkFloorRatio, gateTalkMinRMS) {
+			g.quiet = 0
+		} else {
+			g.quiet += count
+		}
+		return
+	}
+	if g.samples <= gateIgnoreHeadSamples {
 		return
 	}
 	if rms > g.peak {

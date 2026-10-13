@@ -167,6 +167,23 @@ func (h *MCPHandler) handleInitialize(msg ServerMessage) error {
 
 // HandleToolsList responds to tools/list with ESP32-style self.* tools.
 func (h *MCPHandler) HandleToolsList(msg ServerMessage) error {
+	cfg := GetConfig()
+	tools := ToolDefs(cfg)
+	musicTools := MusicToolsEnabled(cfg)
+	if err := h.sendResult(msg.ID, map[string]interface{}{"tools": tools}); err != nil {
+		return err
+	}
+	h.hsMu.Lock()
+	h.musicTools = musicTools
+	h.hsMu.Unlock()
+	h.markToolsDone()
+	log.Printf("[Xiaozhi] MCP ← tools/list → replied (%d tools)", len(tools))
+	return nil
+}
+
+// ToolDefs lists the self.* tools (MCP shape: name, description, inputSchema)
+// shared by the Xiaozhi MCP server and the OpenAI backends.
+func ToolDefs(cfg Config) []map[string]interface{} {
 	tools := []map[string]interface{}{
 		toolDef("self.get_device_status",
 			"Get Anki Vector device status (platform, firmware, battery) plus short live summaries when web board games are active (cờ vua chess_summary and/or cờ tướng xiangqi_summary). Call for robot status, or as a quick check before answering about games.",
@@ -275,22 +292,13 @@ func (h *MCPHandler) HandleToolsList(msg ServerMessage) error {
 			"REQUIRED to summarize Go 9×9 / cờ vây. ALWAYS call before answering about that game.",
 			nil, nil),
 	}
-	musicTools := MusicToolsEnabled(GetConfig())
-	if musicTools {
+	if MusicToolsEnabled(cfg) {
 		tools = append(tools, musicToolDefs()...)
 	}
-	if courseToolsEnabled(GetConfig()) {
+	if courseToolsEnabled(cfg) {
 		tools = append(tools, courseToolDefs()...)
 	}
-	if err := h.sendResult(msg.ID, map[string]interface{}{"tools": tools}); err != nil {
-		return err
-	}
-	h.hsMu.Lock()
-	h.musicTools = musicTools
-	h.hsMu.Unlock()
-	h.markToolsDone()
-	log.Printf("[Xiaozhi] MCP ← tools/list → replied (%d tools)", len(tools))
-	return nil
+	return tools
 }
 
 func toolDef(name, desc string, props map[string]interface{}, required []string) map[string]interface{} {
@@ -324,6 +332,44 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 		}
 	}
 
+	out := ExecuteTool(toolName, args)
+	result := map[string]interface{}{
+		"content": []map[string]interface{}{
+			{"type": "text", "text": out.Text},
+		},
+		"isError": out.IsError,
+	}
+	// Unblock analysis Opus before the WS reply — server may push audio immediately.
+	if out.PostCaptureDone {
+		MarkPostCaptureToolDone()
+	}
+	if err := h.sendResult(msg.ID, result); err != nil {
+		return "", err
+	}
+	if out.Intent != "" && !out.IsError {
+		h.setPending(out.Intent, out.Params)
+		return out.Intent, nil
+	}
+	return "", nil
+}
+
+// ToolOutcome is the transport-neutral result of a self.* tool call.
+type ToolOutcome struct {
+	Text    string
+	IsError bool
+	// Intent (with Params) is the Vector engine intent the call asks for.
+	Intent string
+	Params map[string]string
+	// PostCaptureDone: analyze_photo finished (Xiaozhi Opus gating).
+	PostCaptureDone bool
+}
+
+// ExecuteTool runs a self.* tool by its MCP name. It does not queue the
+// intent; callers decide how to deliver it.
+func ExecuteTool(toolName string, args map[string]interface{}) ToolOutcome {
+	if args == nil {
+		args = map[string]interface{}{}
+	}
 	var intent string
 	var params map[string]string
 	var text string
@@ -401,7 +447,18 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 		if question == "" {
 			question = "What do you see?"
 		}
-		if !HasVisionExplain() {
+		if UsingOpenAI() {
+			analyzeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			result, err := oaiAnalyzeScene(analyzeCtx, question)
+			cancel()
+			if err != nil {
+				isError = true
+				text = fmt.Sprintf(`{"error":%q}`, err.Error())
+				log.Println("[OpenAI] analyze_photo error:", err)
+			} else {
+				text = result
+			}
+		} else if !HasVisionExplain() {
 			isError = true
 			text = `{"error":"vision Explain URL not configured — Xiaozhi server did not send capabilities.vision"}`
 			log.Println("[Xiaozhi] MCP analyze_photo failed: no vision URL")
@@ -513,21 +570,7 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 		text = fmt.Sprintf(`{"error":"unknown tool: %s"}`, toolName)
 	}
 
-	result := map[string]interface{}{
-		"content": []map[string]interface{}{
-			{"type": "text", "text": text},
-		},
-		"isError": isError,
-	}
-	// Unblock analysis Opus before the WS reply — server may push audio immediately.
-	if markPostCaptureDone {
-		MarkPostCaptureToolDone()
-	}
-	if err := h.sendResult(msg.ID, result); err != nil {
-		return "", err
-	}
 	if intent != "" && !isError {
-		h.setPending(intent, params)
 		if len(params) > 0 {
 			log.Printf("[Xiaozhi] MCP %s → intent %s params %v", toolName, intent, params)
 		} else {
@@ -537,9 +580,14 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 			intent == "intent_play_rollcube" || intent == "intent_play_anytrick" {
 			log.Printf("[Xiaozhi][KeepawayFlow] step=mcp_queued intent=%s (await TTS, then same-stream OnIntent — no FakeTrigger/mic)", intent)
 		}
-		return intent, nil
 	}
-	return "", nil
+	return ToolOutcome{
+		Text:            text,
+		IsError:         isError,
+		Intent:          intent,
+		Params:          params,
+		PostCaptureDone: markPostCaptureDone,
+	}
 }
 
 func (h *MCPHandler) sendResult(id interface{}, result interface{}) error {

@@ -101,7 +101,12 @@ func alsaKillLocked() {
 	if alsaCmd != nil && alsaCmd.Process != nil {
 		_ = alsaCmd.Process.Kill()
 	}
-	// Pump owns Wait() and writer Close(); just wait for it to finish.
+	// The FIFO is opened O_RDWR, so with tinyplay gone a full pipe blocks the
+	// pump's Write forever (done never closes). Closing unblocks it.
+	if alsaWriter != nil {
+		_ = alsaWriter.Close()
+	}
+	// Pump owns Wait(); just wait for it to finish.
 	done := alsaDone
 	if done != nil {
 		alsaMu.Unlock()

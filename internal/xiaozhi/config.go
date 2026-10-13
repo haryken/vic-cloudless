@@ -47,6 +47,9 @@ type Config struct {
 	StudentName string         `json:"student_name,omitempty"`
 	// FaceGreet sends the greeting detect when Vector sees a person arrive.
 	FaceGreet bool `json:"face_greet,omitempty"`
+	// Backend: "xiaozhi" (default), "openai", "gemini" (Gemini Live) or
+	// "grok" (xAI Voice); the direct-API ones read openai.json.
+	Backend string `json:"backend,omitempty"`
 }
 
 func defaultConfig() Config {

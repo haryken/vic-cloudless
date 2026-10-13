@@ -162,6 +162,11 @@ func relistenAfterChess() {
 // share MCP chess tools / conversation context — without stealing the mic path.
 func ensureChessXiaozhiSession() error {
 	cfg := GetConfig()
+	if IsDirectAPIBackend(cfg.Backend) {
+		oaiBeginTurn()
+		oaiArmIdle(cfg)
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	client, err := EnsureConnected(ctx, cfg)

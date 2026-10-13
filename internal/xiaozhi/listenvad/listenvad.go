@@ -17,6 +17,7 @@ const (
 	ReasonNoSpeech  = "no_speech"
 	ReasonMaxListen = "max_listen"
 	ReasonMicClosed = "mic_closed"
+	ReasonEndSpeech = "end_of_speech"
 )
 
 var (
@@ -47,6 +48,9 @@ type Options struct {
 	Encode func(pcm []byte) ([]byte, error)
 	// OnFirstFrame runs once after the first Opus frame is sent.
 	OnFirstFrame func()
+	// EndOfSpeech > 0 ends the listen locally after that much silence
+	// following speech (uplinks without server-side end-of-speech).
+	EndOfSpeech time.Duration
 }
 
 type Result struct {
@@ -93,7 +97,12 @@ loop:
 				break loop
 			}
 			gate.Feed(chunk)
+			endSpeech := opts.EndOfSpeech > 0 && gate.SilenceAfterSpeech() >= opts.EndOfSpeech
 			if opts.Encode == nil || opts.FrameBytes <= 0 {
+				if endSpeech {
+					res.Reason = ReasonEndSpeech
+					break loop
+				}
 				continue
 			}
 			encBuf = append(encBuf, chunk...)
@@ -112,6 +121,10 @@ loop:
 				if res.Frames == 1 && opts.OnFirstFrame != nil {
 					opts.OnFirstFrame()
 				}
+			}
+			if endSpeech {
+				res.Reason = ReasonEndSpeech
+				break loop
 			}
 		case stt := <-up.STTCh():
 			res.STT = stt

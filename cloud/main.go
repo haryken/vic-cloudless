@@ -268,7 +268,7 @@ func xzcloudinit() xiaozhi.Config {
 	}
 	initChessSpeak()
 	xiaozhi.StartChessAnnounceWatcher()
-	if cfg.DeviceID != "" && cfg.ClientID != "" {
+	if !xiaozhi.IsDirectAPIBackend(cfg.Backend) && cfg.DeviceID != "" && cfg.ClientID != "" {
 		go func() {
 			if err := xiaozhi.OtaCheck(&cfg); err != nil {
 				log.Println("Xiaozhi OTA check:", err)

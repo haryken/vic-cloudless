@@ -162,6 +162,11 @@ func fetchGoogleTranslatePCM16k(text, lang string) ([]byte, error) {
 	if len(mp3) < 64 {
 		return nil, fmt.Errorf("google tts empty body")
 	}
+	return decodeMP3To16k(mp3)
+}
+
+// decodeMP3To16k decodes an MP3 clip to mono s16le at 16 kHz.
+func decodeMP3To16k(mp3 []byte) ([]byte, error) {
 	dec, data, err := minimp3.DecodeFull(mp3)
 	if err != nil {
 		return nil, fmt.Errorf("minimp3: %w", err)

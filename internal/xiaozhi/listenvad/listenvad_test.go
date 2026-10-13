@@ -235,6 +235,54 @@ func TestCaptureNoUplink(t *testing.T) {
 	}
 }
 
+func TestSpeechGateSilenceAfterSpeech(t *testing.T) {
+	rng := rand.New(rand.NewSource(6))
+	g := NewSpeechGate()
+	feedMs(g, 300, 0, rng)
+	for i := 0; i < 4; i++ {
+		feedMs(g, 250, 3000, rng)
+		feedMs(g, 80, 0, rng)
+	}
+	if !g.Started() {
+		t.Fatal("speech not detected")
+	}
+	if s := g.SilenceAfterSpeech(); s > 200*time.Millisecond {
+		t.Fatalf("word gap reads as %v silence", s)
+	}
+	feedMs(g, 900, 0, rng)
+	if s := g.SilenceAfterSpeech(); s < 850*time.Millisecond {
+		t.Fatalf("silence %v after 900ms quiet", s)
+	}
+	feedMs(g, 100, 3000, rng)
+	if s := g.SilenceAfterSpeech(); s != 0 {
+		t.Fatalf("silence %v after talking resumed", s)
+	}
+}
+
+func TestCaptureEndOfSpeech(t *testing.T) {
+	up := newFakeUplink()
+	audio := make(chan []byte, 10)
+	stop := make(chan struct{})
+	defer close(stop)
+	go micFeed(audio, stop, func(ms int) float64 {
+		if ms < 1300 {
+			return talking(ms)
+		}
+		return 0
+	})
+
+	opts := testOpts()
+	opts.MaxListen = 5 * time.Second
+	opts.EndOfSpeech = 600 * time.Millisecond
+	res, err := Capture(context.Background(), up, audio, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason != ReasonEndSpeech || !res.Speech || up.stops() != 1 {
+		t.Fatalf("reason %q speech %v stops %d", res.Reason, res.Speech, up.stops())
+	}
+}
+
 func TestCaptureCancelled(t *testing.T) {
 	up := newFakeUplink()
 	audio := make(chan []byte)

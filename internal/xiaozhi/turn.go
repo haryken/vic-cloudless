@@ -59,6 +59,9 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	// do NOT tie turnCancel to strm.ctx: afterSTT→OnIntent closes the streamer
 	// and would abort TTS before playback (false "barge-in").
 	_ = ctx
+	if IsDirectAPIBackend(cfg.Backend) {
+		return runOpenAITurn(audioStream, cfg, afterSTT, detectText)
+	}
 	turnCtx, turnCancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer turnCancel()
 
