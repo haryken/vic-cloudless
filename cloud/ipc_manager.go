@@ -30,6 +30,7 @@ import (
 	extint "github.com/digital-dream-labs/vector-cloud/internal/proto/external_interface"
 
 	"github.com/digital-dream-labs/vector-cloud/internal/log"
+	"github.com/digital-dream-labs/vector-cloud/internal/xiaozhi"
 
 	"github.com/golang/protobuf/proto"
 	"google.golang.org/grpc"
@@ -674,6 +675,7 @@ func (manager *EngineCladIpcManager) ProcessMessages() {
 			manager.SendEventToChannel(event)
 			// @TODO: Convert all face events to proto VIC-4643
 		case gw_clad.MessageRobotToExternalTag_RobotObservedFace:
+			xiaozhi.OnFaceObserved(msg.GetRobotObservedFace().FaceID)
 			event := &extint.Event{
 				EventType: &extint.Event_RobotObservedFace{
 					RobotObservedFace: CladRobotObservedFaceToProto(msg.GetRobotObservedFace()),

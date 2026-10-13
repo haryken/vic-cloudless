@@ -62,6 +62,7 @@ func watchConfigReload() {
 }
 
 func applyConfigReload() {
+	noteConversation()
 	prev := GetConfig()
 	cfg := LoadConfig()
 	log.Printf("[Xiaozhi][Reload] applying: enabled %v→%v identity %q→%q device %s→%s",

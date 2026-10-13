@@ -133,6 +133,7 @@ func closeSessionLocked(reason string) {
 	if sess.client == nil {
 		return
 	}
+	noteConversation()
 	sid := sess.client.SessionID()
 	stopMCPPumpLocked()
 	_ = sess.client.SendGoodbye()
@@ -253,6 +254,7 @@ func BindTurn(cancel context.CancelFunc) uint64 {
 	sess.turnGen++
 	sess.turnCancel = cancel
 	sess.ttsPending = false
+	noteConversation()
 	if sess.idleTimer != nil {
 		sess.idleTimer.Stop()
 		sess.idleTimer = nil

@@ -45,6 +45,8 @@ type Config struct {
 	CourseBook  map[string]int `json:"course_book,omitempty"`
 	CourseUnit  map[string]int `json:"course_unit,omitempty"`
 	StudentName string         `json:"student_name,omitempty"`
+	// FaceGreet sends the greeting detect when Vector sees a person arrive.
+	FaceGreet bool `json:"face_greet,omitempty"`
 }
 
 func defaultConfig() Config {

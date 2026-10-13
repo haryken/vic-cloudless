@@ -173,6 +173,11 @@ func mainGateway() {
 	engineProtoManager.Init()
 	defer engineProtoManager.Close()
 
+	// Engine events (faces, settings replies) must not wait on switchboard,
+	// whose socket can stay EPERM after a vic-cloud-only restart.
+	go engineCladManager.ProcessMessages()
+	go engineProtoManager.ProcessMessages()
+
 	if IsOnRobot {
 		switchboardManager.Init()
 		defer switchboardManager.Close()
@@ -267,8 +272,6 @@ func mainGateway() {
 		},
 	}
 
-	go engineCladManager.ProcessMessages()
-	go engineProtoManager.ProcessMessages()
 	if IsOnRobot {
 		go switchboardManager.ProcessMessages()
 		go tokenManager.StartUpdateListener()
