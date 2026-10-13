@@ -616,6 +616,7 @@ func BargeIn(reason string) bool {
 	log.Println("[Xiaozhi] barge-in:", reason, "session:", ActiveSessionID())
 
 	if client != nil && client.Alive() {
+		client.DiscardStaleReply()
 		if err := client.SendAbortSpeaking(reason); err != nil {
 			log.Println("[Xiaozhi] abort send:", err)
 			// Socket is dead — drop it so the next listen dials fresh.

@@ -35,8 +35,16 @@ type Config struct {
 	MusicSource    string `json:"music_source,omitempty"`
 	MusicServerURL string `json:"music_server_url,omitempty"`
 	// IdentityMode: "vi_pool" = shared Vietnamese preset (rotate MAC/UUID on boot);
+	// "course" = English-teaching course pool (see course package);
 	// "custom" = user-paired xiaozhi.me device.
 	IdentityMode string `json:"identity_mode,omitempty"`
+	// English-teaching course (identity_mode "course"). Maps are keyed by the
+	// course index ("1".."5"); CourseUnit by "<course>.<book>" (unit 1-based).
+	CourseIdx   int            `json:"course_idx,omitempty"`
+	CourseVoice map[string]int `json:"course_voice,omitempty"`
+	CourseBook  map[string]int `json:"course_book,omitempty"`
+	CourseUnit  map[string]int `json:"course_unit,omitempty"`
+	StudentName string         `json:"student_name,omitempty"`
 }
 
 func defaultConfig() Config {

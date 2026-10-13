@@ -286,11 +286,13 @@ func StopMusic(reason string) bool {
 	return p != nil || pb != nil
 }
 
-// runMusicDetect reopens the WSS and sends listen/detect text; the reply TTS
+func runMusicDetect(text string) { runWakeDetect("[Xiaozhi][Music]", text) }
+
+// runWakeDetect reopens the WSS and sends listen/detect text; the reply TTS
 // plays and the normal continuous relisten opens the mic afterwards.
-func runMusicDetect(text string) {
+func runWakeDetect(tag, text string) {
 	if IsBusy() {
-		log.Printf("[Xiaozhi][Music] skip detect %q — a turn is already active", text)
+		log.Printf("%s skip detect %q — a turn is already active", tag, text)
 		return
 	}
 	var result *TurnResult
@@ -304,7 +306,7 @@ func runMusicDetect(text string) {
 		if err == nil || errors.Is(err, ErrAborted) {
 			break
 		}
-		log.Printf("[Xiaozhi][Music] detect %q attempt %d/%d: %v", text, attempt, musicDetectTries, err)
+		log.Printf("%s detect %q attempt %d/%d: %v", tag, text, attempt, musicDetectTries, err)
 		// Only retry when the server never answered (dial / send failures).
 		if !strings.Contains(err.Error(), "dial") && !strings.Contains(err.Error(), "listen detect") {
 			break
@@ -316,14 +318,14 @@ func runMusicDetect(text string) {
 	}
 	if err != nil {
 		if !errors.Is(err, ErrAborted) {
-			log.Printf("[Xiaozhi][Music] detect %q gave up: %v", text, err)
+			log.Printf("%s detect %q gave up: %v", tag, text, err)
 		}
 		return
 	}
-	finishDetectTurn(result)
+	finishDetectTurn(tag, result)
 }
 
-func finishDetectTurn(result *TurnResult) {
+func finishDetectTurn(tag string, result *TurnResult) {
 	if result.StreamedAudio {
 		DisarmRelistenPending()
 		idleOK := WaitPlaybackIdle(result.PCMBytes, result.AudioStartedAt, 120*time.Second)
@@ -339,15 +341,15 @@ func finishDetectTurn(result *TurnResult) {
 	if StartPendingMusic("after detect TTS") {
 		return
 	}
-	ClearPendingMCPIntent("music detect done")
+	ClearPendingMCPIntent("detect done")
 	if result.EndConversation || !SessionAlive() || !ContinuousMode() || InBlackjackGameMode() {
-		log.Println("[Xiaozhi][Music] detect reply done — mic closed until Hey Vector")
+		log.Println(tag, "detect reply done — mic closed until Hey Vector")
 		return
 	}
 	time.Sleep(350 * time.Millisecond)
 	if err := TriggerRelisten(); err != nil {
-		log.Println("[Xiaozhi][Music] relisten after detect:", err)
+		log.Println(tag, "relisten after detect:", err)
 		return
 	}
-	log.Println("[Xiaozhi][Music] relisten after detect reply")
+	log.Println(tag, "relisten after detect reply")
 }

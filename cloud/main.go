@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -103,8 +104,13 @@ func main() {
 	// TEMP_PERF_RAM_PROBE — 10s total + per-process RSS; remove after profiling.
 	memprobe.Start()
 
+	// Before the Vosk load: a SIGTERM mid-load must exit cleanly, otherwise
+	// systemd records a failure and vic-on-exit raises fault 923.
+	signalHandler()
+
 	// Load Xiaozhi config early so all subsystems can check Enabled().
 	xiaozhiCfg := xzcloudinit()
+	xiaozhi.StartConfigReloadWatcher()
 	if xiaozhiCfg.Enabled {
 		log.Println("Xiaozhi integration enabled; endpoint:", xiaozhiCfg.Endpoint)
 		// Xiaozhi replaces local STT — skip Vosk model (~tens of MB RSS).
@@ -117,6 +123,7 @@ func main() {
 	go vtr.WeatherFetcher()
 
 	robot.InstallCrashReporter(log.Tag)
+	crashReporterInstalled.Store(true)
 
 	// if we want to error, we should do it after we get socket connections, to make sure
 	// vic-anim is running and able to handle it
@@ -130,8 +137,6 @@ func main() {
 			log.Println("Cloud data verified")
 		}
 	}
-
-	signalHandler()
 
 	// don't yet have control over process startup on DVT2, set these as default
 	test := false
@@ -219,13 +224,17 @@ func main() {
 	log.Println("All processes exited, shutting down")
 }
 
+var crashReporterInstalled atomic.Bool
+
 func signalHandler() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-ch
 		fmt.Println("Received SIGTERM, shutting down immediately")
-		robot.UninstallCrashReporter()
+		if crashReporterInstalled.Load() {
+			robot.UninstallCrashReporter()
+		}
 		os.Exit(0)
 	}()
 }
@@ -241,15 +250,19 @@ func xzcloudinit() xiaozhi.Config {
 	if !cfg.Enabled {
 		return cfg
 	}
-	if xiaozhi.IsViPool(cfg) {
+	if xiaozhi.IsViPool(cfg) || xiaozhi.IsCourse(cfg) {
 		if xiaozhi.ConsumeSkipRotate() {
-			log.Printf("[Xiaozhi] vi_pool keep MAC=%s client=%s", cfg.DeviceID, cfg.ClientID)
+			log.Printf("[Xiaozhi] %s keep MAC=%s client=%s", cfg.IdentityMode, cfg.DeviceID, cfg.ClientID)
 		} else {
-			xiaozhi.RotateViPoolIdentity(&cfg)
-			if err := xiaozhi.SaveConfig(cfg); err != nil {
-				log.Println("[Xiaozhi] vi_pool save:", err)
+			if xiaozhi.IsCourse(cfg) {
+				xiaozhi.RotateCourseIdentity(&cfg)
 			} else {
-				log.Printf("[Xiaozhi] vi_pool identity MAC=%s client=%s", cfg.DeviceID, cfg.ClientID)
+				xiaozhi.RotateViPoolIdentity(&cfg)
+			}
+			if err := xiaozhi.SaveConfig(cfg); err != nil {
+				log.Println("[Xiaozhi] pool identity save:", err)
+			} else {
+				log.Printf("[Xiaozhi] %s identity MAC=%s client=%s", cfg.IdentityMode, cfg.DeviceID, cfg.ClientID)
 			}
 		}
 	}

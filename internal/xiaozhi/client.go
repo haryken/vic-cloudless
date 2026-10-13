@@ -11,7 +11,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/digital-dream-labs/vector-cloud/internal/log"
 )
+
+// Upper bound for DiscardStaleReply in case the server never sends tts stop
+// or a new tts start (every reply in field logs begins with tts start).
+const staleReplyMaxDiscard = 60 * time.Second
 
 // Message types from server.
 const (
@@ -67,6 +73,10 @@ type Client struct {
 	// TRACE: WSS binary TTS RX counters (uint32 — ARM32 forbids unaligned uint64 atomics).
 	rxAudioN       uint32
 	rxAudioDropped uint32
+
+	// Unix nanos until which the read loop drops the aborted reply; 0 = off.
+	discardUntil atomic.Int64
+	staleDropped uint32
 }
 
 // Dial creates and connects a new Xiaozhi WebSocket client, sends hello, and waits for server hello.
@@ -163,6 +173,35 @@ func (c *Client) DrainEventChannels() {
 			return
 		}
 	}
+}
+
+// DiscardStaleReply drops TTS/LLM/audio of the reply the robot just aborted
+// until the server ends it (tts stop) or begins a new reply (tts start).
+// The server can keep streaming an aborted reply for seconds after the abort;
+// otherwise that tail is queued and played as the next turn's answer.
+func (c *Client) DiscardStaleReply() {
+	atomic.StoreUint32(&c.staleDropped, 0)
+	c.discardUntil.Store(time.Now().Add(staleReplyMaxDiscard).UnixNano())
+}
+
+func (c *Client) discardingStaleReply() bool {
+	until := c.discardUntil.Load()
+	if until == 0 {
+		return false
+	}
+	if time.Now().UnixNano() < until {
+		return true
+	}
+	c.endStaleDiscard("timeout")
+	return false
+}
+
+func (c *Client) endStaleDiscard(reason string) {
+	if c.discardUntil.Swap(0) == 0 {
+		return
+	}
+	log.Printf("[Xiaozhi] stale reply discard ended (%s) — dropped %d events",
+		reason, atomic.LoadUint32(&c.staleDropped))
 }
 
 // DrainAudioChannel discards queued Opus TTS frames only (keep TTS/LLM/MCP).
@@ -404,6 +443,10 @@ func (c *Client) readLoop(ctx context.Context) {
 
 		if mt == websocket.BinaryMessage {
 			_ = atomic.AddUint32(&c.rxAudioN, 1)
+			if c.discardingStaleReply() {
+				_ = atomic.AddUint32(&c.staleDropped, 1)
+				continue
+			}
 			frame := make([]byte, len(msg))
 			copy(frame, msg)
 			select {
@@ -441,11 +484,27 @@ func (c *Client) readLoop(ctx context.Context) {
 				}
 			}
 		case MsgTypeTTS:
+			if c.discardingStaleReply() {
+				switch sm.State {
+				case TTSStateStop:
+					c.endStaleDiscard("server stop")
+					continue
+				case TTSStateStart:
+					c.endStaleDiscard("new reply start")
+				default:
+					_ = atomic.AddUint32(&c.staleDropped, 1)
+					continue
+				}
+			}
 			select {
 			case c.ttsCh <- sm:
 			default:
 			}
 		case MsgTypeLLM:
+			if c.discardingStaleReply() {
+				_ = atomic.AddUint32(&c.staleDropped, 1)
+				continue
+			}
 			select {
 			case c.llmCh <- sm:
 			default:

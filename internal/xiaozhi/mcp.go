@@ -279,6 +279,9 @@ func (h *MCPHandler) HandleToolsList(msg ServerMessage) error {
 	if musicTools {
 		tools = append(tools, musicToolDefs()...)
 	}
+	if courseToolsEnabled(GetConfig()) {
+		tools = append(tools, courseToolDefs()...)
+	}
 	if err := h.sendResult(msg.ID, map[string]interface{}{"tools": tools}); err != nil {
 		return err
 	}
@@ -502,6 +505,10 @@ func (h *MCPHandler) HandleToolCall(msg ServerMessage) (string, error) {
 		text = `{"status":"ok","intent":"intent_play_fistbump"}`
 
 	default:
+		if kind := courseToolKind(toolName); kind != "" {
+			text, isError = handleCourseTool(kind, args)
+			break
+		}
 		isError = true
 		text = fmt.Sprintf(`{"error":"unknown tool: %s"}`, toolName)
 	}

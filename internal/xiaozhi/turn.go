@@ -291,6 +291,7 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 
 	abortServerTTS := func(reason string) {
 		MarkPendingServerAbort()
+		client.DiscardStaleReply()
 		if err := client.SendAbortSpeaking(reason); err != nil {
 			log.Println("[Xiaozhi] abort speaking:", err)
 		}
