@@ -27,8 +27,8 @@ type Config struct {
 	TTSMode               string `json:"tts_mode"`
 	GameGoogleTTSVI       bool   `json:"game_google_tts_vi"`
 	GameGoogleTTSLang     string `json:"game_google_tts_lang,omitempty"`
-	// ListenMode: "fixed" (default) = Vector's ~6s mic window; "vad" = keep the
-	// mic open until the server returns STT (see listen_vad.go).
+	// ListenMode: "vad" (default, also when empty) = keep the mic open until the
+	// server returns STT (see listen_vad.go); "fixed" = Vector's ~6s mic window.
 	ListenMode string `json:"listen_mode,omitempty"`
 	// MusicSource: "server" (default) leaves music to the Xiaozhi server;
 	// "youtube" lists self.music.play, which streams from MusicServerURL.
@@ -47,6 +47,9 @@ type Config struct {
 	StudentName string         `json:"student_name,omitempty"`
 	// FaceGreet sends the greeting detect when Vector sees a person arrive.
 	FaceGreet bool `json:"face_greet,omitempty"`
+	// FaceGreetEveryMin: minimum minutes between face greetings; unset = 5,
+	// 0 = no wait (greet whenever someone arrives and no chat is running).
+	FaceGreetEveryMin *int `json:"face_greet_every_min,omitempty"`
 	// Backend: "xiaozhi" (default), "openai", "gemini" (Gemini Live) or
 	// "grok" (xAI Voice); the direct-API ones read openai.json.
 	Backend string `json:"backend,omitempty"`

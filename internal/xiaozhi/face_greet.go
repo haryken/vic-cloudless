@@ -11,10 +11,10 @@ import (
 // are sparse (often one every few seconds, some minutes apart), so a person is
 // treated as "arrived" only after no face was seen for faceAbsentGap.
 const (
-	faceAbsentGap  = 60 * time.Second
-	faceGreetEvery = 5 * time.Minute
-	faceQuietAfter = 30 * time.Second
-	faceGreetTag   = "[Xiaozhi][Face]"
+	faceAbsentGap         = 60 * time.Second
+	faceGreetEveryDefault = 5 * time.Minute
+	faceQuietAfter        = 30 * time.Second
+	faceGreetTag          = "[Xiaozhi][Face]"
 )
 
 var face struct {
@@ -52,8 +52,6 @@ func faceArrivalDue(now time.Time) bool {
 	switch {
 	case !arrived, face.greeting:
 		return false
-	case !face.lastGreet.IsZero() && now.Sub(face.lastGreet) < faceGreetEvery:
-		return false
 	case !face.lastTalk.IsZero() && now.Sub(face.lastTalk) < faceQuietAfter:
 		return false
 	}
@@ -76,6 +74,10 @@ func greetFace(faceID int32) {
 	if !cfg.Enabled || !cfg.FaceGreet {
 		return
 	}
+	if left := faceGreetCooldownLeft(time.Now(), faceGreetInterval(cfg)); left > 0 {
+		log.Printf("%s face %d seen — skip greeting (next allowed in %v)", faceGreetTag, faceID, left.Round(time.Second))
+		return
+	}
 	if reason := faceGreetBlocked(); reason != "" {
 		log.Printf("%s face %d seen — skip greeting (%s)", faceGreetTag, faceID, reason)
 		return
@@ -83,6 +85,27 @@ func greetFace(faceID int32) {
 	log.Printf("%s face %d arrived — greeting", faceGreetTag, faceID)
 	greeted = true
 	runWakeDetect(faceGreetTag, GreetDetectText)
+}
+
+// faceGreetInterval is the user-chosen gap between greetings (face_greet_every_min).
+func faceGreetInterval(cfg Config) time.Duration {
+	switch {
+	case cfg.FaceGreetEveryMin == nil:
+		return faceGreetEveryDefault
+	case *cfg.FaceGreetEveryMin <= 0:
+		return 0
+	}
+	return time.Duration(*cfg.FaceGreetEveryMin) * time.Minute
+}
+
+// faceGreetCooldownLeft is how long until the next greeting is allowed (<= 0: now).
+func faceGreetCooldownLeft(now time.Time, every time.Duration) time.Duration {
+	face.mu.Lock()
+	defer face.mu.Unlock()
+	if face.lastGreet.IsZero() {
+		return 0
+	}
+	return every - now.Sub(face.lastGreet)
 }
 
 func faceGreetBlocked() string {

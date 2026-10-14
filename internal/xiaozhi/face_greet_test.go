@@ -48,11 +48,45 @@ func TestFaceReturnRespectsCooldown(t *testing.T) {
 	t0 := time.Now()
 	faceArrivalDue(t0)
 	finishGreet(t0)
-	if faceArrivalDue(t0.Add(2 * time.Minute)) {
-		t.Fatal("returned within cooldown must not greet")
+	back := t0.Add(2 * time.Minute)
+	if !faceArrivalDue(back) {
+		t.Fatal("re-arrival after absence should reach the cooldown check")
 	}
-	if !faceArrivalDue(t0.Add(faceGreetEvery + 2*time.Minute)) {
-		t.Fatal("returned after cooldown and absence should greet")
+	if faceGreetCooldownLeft(back, faceGreetEveryDefault) <= 0 {
+		t.Fatal("returned within the default 5 min must not greet")
+	}
+	if faceGreetCooldownLeft(back, time.Minute) > 0 {
+		t.Fatal("a 1 min interval must allow greeting after 2 min")
+	}
+	if faceGreetCooldownLeft(t0.Add(faceGreetEveryDefault+time.Second), faceGreetEveryDefault) > 0 {
+		t.Fatal("returned after the cooldown should greet")
+	}
+}
+
+func TestFaceGreetInterval(t *testing.T) {
+	if faceGreetInterval(Config{}) != faceGreetEveryDefault {
+		t.Fatal("unset interval must default to 5 min")
+	}
+	fifteen, zero := 15, 0
+	if faceGreetInterval(Config{FaceGreetEveryMin: &fifteen}) != 15*time.Minute {
+		t.Fatal("configured minutes not applied")
+	}
+	if faceGreetInterval(Config{FaceGreetEveryMin: &zero}) != 0 {
+		t.Fatal("0 must mean no wait")
+	}
+}
+
+func TestFaceGreetNoWaitStillNeedsArrival(t *testing.T) {
+	resetFaceState()
+	t0 := time.Now()
+	faceArrivalDue(t0)
+	finishGreet(t0)
+	if faceArrivalDue(t0.Add(20 * time.Second)) {
+		t.Fatal("a person still in view must not be greeted again")
+	}
+	back := t0.Add(20*time.Second + faceAbsentGap)
+	if !faceArrivalDue(back) || faceGreetCooldownLeft(back, 0) > 0 {
+		t.Fatal("with no wait, a returning person should be greeted")
 	}
 }
 

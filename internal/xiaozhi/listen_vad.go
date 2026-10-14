@@ -31,9 +31,10 @@ const (
 // ErrNoSpeech: "vad" listen closed because nobody spoke; caller ends quietly.
 var ErrNoSpeech = listenvad.ErrNoSpeech
 
-// VADListenMode: the OpenAI backend always ends the listen on end-of-speech.
+// VADListenMode: end-of-speech listening is the default; only an explicit
+// "fixed" keeps Vector's ~6s window. Direct-API backends always use VAD.
 func VADListenMode(cfg Config) bool {
-	return cfg.ListenMode == ListenModeVAD || IsDirectAPIBackend(cfg.Backend)
+	return cfg.ListenMode != ListenModeFixed || IsDirectAPIBackend(cfg.Backend)
 }
 
 // ListenVADActive reports the /run flag that vic-anim latched for this stream.
