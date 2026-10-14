@@ -518,7 +518,7 @@ type glServerMsg struct {
 }
 
 func glAwaitResponse(ctx context.Context, c *glConn, detect bool, st *oaiTurnState) error {
-	var carry []byte
+	var down down24to16
 	var heard strings.Builder
 	audioMuted := false
 	// toolPending: a tool response went out and no reply has followed yet.
@@ -624,7 +624,7 @@ func glAwaitResponse(ctx context.Context, c *glConn, detect bool, st *oaiTurnSta
 					}
 					var pcm []byte
 					if rate := pcmRateFromMime(p.InlineData.MimeType, glOutputRate); rate == glOutputRate {
-						pcm = down24to16(&carry, raw)
+						pcm = down.Process(raw)
 					} else {
 						pcm = resampleS16(raw, rate, 16000)
 					}

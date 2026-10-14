@@ -578,12 +578,12 @@ func oaiSpeakOpenAI(ctx context.Context, ocfg OpenAIConfig, text string, write f
 	if resp.StatusCode != http.StatusOK {
 		return oaiAPIError(resp)
 	}
-	var carry []byte
+	var down down24to16
 	buf := make([]byte, 4800)
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
-			if err := write(down24to16(&carry, buf[:n])); err != nil {
+			if err := write(down.Process(buf[:n])); err != nil {
 				return err
 			}
 		}

@@ -160,6 +160,51 @@ func TestCaptureEndsOnServerSTT(t *testing.T) {
 	}
 }
 
+type recordUplink struct {
+	*fakeUplink
+	packets [][]byte
+}
+
+func (r *recordUplink) SendAudio(p []byte) error {
+	r.packets = append(r.packets, append([]byte(nil), p...))
+	return nil
+}
+
+func TestCaptureMuteHeadSendsSilenceThenAudio(t *testing.T) {
+	up := &recordUplink{fakeUplink: newFakeUplink()}
+	audio := make(chan []byte, 10)
+	stop := make(chan struct{})
+	defer close(stop)
+	go micFeed(audio, stop, func(int) float64 { return 5000 })
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		up.stt <- "x"
+	}()
+
+	opts := testOpts()
+	opts.Encode = func(p []byte) ([]byte, error) { return append([]byte(nil), p...), nil }
+	opts.MuteHead = 120 * time.Millisecond // 960-sample frames: first two muted
+	if _, err := Capture(context.Background(), up, audio, opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(up.packets) < 4 {
+		t.Fatalf("only %d packets", len(up.packets))
+	}
+	loud := func(p []byte) bool {
+		for _, b := range p {
+			if b != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	for i, p := range up.packets {
+		if want := i >= 2; loud(p) != want {
+			t.Fatalf("packet %d loud=%v, want %v", i, loud(p), want)
+		}
+	}
+}
+
 func TestCaptureLongSpeechNotCutAtNoSpeechTimeout(t *testing.T) {
 	up := newFakeUplink()
 	audio := make(chan []byte, 10)
@@ -294,5 +339,47 @@ func TestCaptureCancelled(t *testing.T) {
 	_, err := Capture(ctx, up, audio, testOpts())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err %v, want context.Canceled", err)
+	}
+}
+
+func TestSpeechGateEndsOverSteadyRoomNoise(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	g := NewSpeechGate()
+	feedMs(g, 300, 0, rng)
+	feedMs(g, 1500, 6000, rng)
+	if !g.Started() {
+		t.Fatal("speech not detected")
+	}
+	// Fan / TV well above the quiet floor but far below the voice.
+	feedMs(g, 900, 500, rng)
+	if s := g.SilenceAfterSpeech(); s < 850*time.Millisecond {
+		t.Fatalf("room noise held the mic: silence %v thr %.0f", s, g.TalkThreshold())
+	}
+}
+
+func TestSpeechGateIgnoresLoneClicks(t *testing.T) {
+	rng := rand.New(rand.NewSource(8))
+	g := NewSpeechGate()
+	feedMs(g, 300, 0, rng)
+	feedMs(g, 1000, 3000, rng)
+	for i := 0; i < 5; i++ {
+		feedMs(g, 180, 0, rng)
+		feedMs(g, 20, 3000, rng) // one loud 20ms frame
+	}
+	if s := g.SilenceAfterSpeech(); s < 900*time.Millisecond {
+		t.Fatalf("lone clicks restarted the silence count: %v", s)
+	}
+}
+
+func TestSpeechGateWordGapsOverNoiseKeepTalking(t *testing.T) {
+	rng := rand.New(rand.NewSource(9))
+	g := NewSpeechGate()
+	feedMs(g, 300, 0, rng)
+	for i := 0; i < 6; i++ {
+		feedMs(g, 300, 5000, rng)
+		feedMs(g, 250, 400, rng)
+	}
+	if s := g.SilenceAfterSpeech(); s > 300*time.Millisecond {
+		t.Fatalf("word gaps read as %v silence", s)
 	}
 }

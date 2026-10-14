@@ -301,6 +301,7 @@ func StreamAppendSuspended() bool {
 // StreamAppend appends decoded 16kHz s16le PCM and maintains a sliding tmpfs window.
 // Plan B (ALSA): writes directly to tinyplay FIFO — ALSA provides backpressure.
 func StreamAppend(pcm []byte) (fileSize int64, err error) {
+	pcm = applyTTSGain(pcm)
 	if UseAlsaPlayback() {
 		if len(pcm) == 0 {
 			return alsaBytesWritten(), nil

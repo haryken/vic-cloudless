@@ -170,7 +170,7 @@ func googleSpeakSegments(ctx context.Context, segs []langSeg, write func([]byte)
 		if err != nil {
 			return fmt.Errorf("google %s: %w", seg.lang, err)
 		}
-		if err := oaiWritePCM(ctx, ApplyGain(pcm, 1.7), write); err != nil {
+		if err := oaiWritePCM(ctx, cleanGain(pcm, 1.7), write); err != nil {
 			return err
 		}
 	}

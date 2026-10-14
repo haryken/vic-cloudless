@@ -24,6 +24,12 @@ const (
 	// endings do not read as silence.
 	gateTalkFloorRatio = 2.5
 	gateTalkMinRMS     = 150.0
+	// Frames this far below the loudest voice (~-18 dB) read as silence, so
+	// steady room noise (fan, TV, motors) above the floor cannot hold the mic.
+	gateTalkPeakRatio = 0.12
+	// Talking resumes only after ~60ms of loud frames; lone clicks and motor
+	// ticks do not restart the end-of-speech count.
+	gateTalkRunFrames = 3
 )
 
 // SpeechGate answers "has anyone started talking" for 16kHz s16le mono PCM.
@@ -36,8 +42,11 @@ type SpeechGate struct {
 	peak    float64
 	hot     int
 	started bool
-	// quiet counts consecutive non-talking samples since speech started.
+	// quiet counts non-talking samples since speech last resumed.
 	quiet int
+	// voice is the loudest frame since the first voiced frame.
+	voice   float64
+	talkRun int
 }
 
 func NewSpeechGate() *SpeechGate {
@@ -56,6 +65,12 @@ func (g *SpeechGate) Feed(pcm []byte) {
 func (g *SpeechGate) Started() bool  { return g.started }
 func (g *SpeechGate) Floor() float64 { return g.floor }
 func (g *SpeechGate) Peak() float64  { return g.peak }
+
+// TalkThreshold is the RMS a frame must exceed to count as talking once
+// speech has started.
+func (g *SpeechGate) TalkThreshold() float64 {
+	return math.Max(math.Max(g.floor*gateTalkFloorRatio, gateTalkMinRMS), g.voice*gateTalkPeakRatio)
+}
 
 // SilenceAfterSpeech is how long the input has been quiet since speech
 // started (0 before speech or while talking).
@@ -83,11 +98,19 @@ func (g *SpeechGate) frame(b []byte) {
 	}
 
 	if g.started {
-		if rms > math.Max(g.floor*gateTalkFloorRatio, gateTalkMinRMS) {
-			g.quiet = 0
-		} else {
-			g.quiet += count
+		if rms > g.voice {
+			g.voice = rms
 		}
+		if rms > g.TalkThreshold() {
+			g.talkRun++
+			if g.talkRun >= gateTalkRunFrames {
+				g.quiet = 0
+				return
+			}
+		} else {
+			g.talkRun = 0
+		}
+		g.quiet += count
 		return
 	}
 	if g.samples <= gateIgnoreHeadSamples {
@@ -103,5 +126,6 @@ func (g *SpeechGate) frame(b []byte) {
 	}
 	if g.hot >= gateHotFrames {
 		g.started = true
+		g.voice = g.peak
 	}
 }

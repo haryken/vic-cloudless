@@ -59,7 +59,7 @@ func RunGoogleAnnounce(text, lang string) error {
 	}
 	// Google Translate TTS is quieter than Acapela / Xiaozhi; soft-boost before ALSA.
 	// Keep gain modest — 3× + noisy MP3 decode saturates and sounds rè.
-	pcm = ApplyGain(pcm, 1.7)
+	pcm = cleanGain(pcm, 1.7)
 	if err := playPCM16kALSA(pcm); err != nil {
 		log.Println("[Xiaozhi][Chess] Google ALSA failed, SayText fallback:", err)
 		return RunChessAnnounce(text)
@@ -205,6 +205,9 @@ func resampleS16(in []byte, fromRate, toRate int) []byte {
 	inN := len(in) / 2
 	if inN < 2 {
 		return in
+	}
+	if toRate < fromRate {
+		in = lowpassS16(in, antiAliasTaps(fromRate, toRate))
 	}
 	outN := int(float64(inN) * float64(toRate) / float64(fromRate))
 	if outN < 1 {

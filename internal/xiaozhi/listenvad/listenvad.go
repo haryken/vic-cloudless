@@ -51,6 +51,9 @@ type Options struct {
 	// EndOfSpeech > 0 ends the listen locally after that much silence
 	// following speech (uplinks without server-side end-of-speech).
 	EndOfSpeech time.Duration
+	// MuteHead uplinks silence for this long after listen start so the wake
+	// earcon cannot trip a server-side VAD (which would answer it).
+	MuteHead time.Duration
 }
 
 type Result struct {
@@ -63,6 +66,8 @@ type Result struct {
 	Speech bool
 	Floor  float64
 	Peak   float64
+	// TalkThr is the end-of-speech talking threshold when the listen ended.
+	TalkThr float64
 	// StopErr is the ListenStop send error (logged by caller, not fatal).
 	StopErr error
 }
@@ -74,6 +79,8 @@ func Capture(ctx context.Context, up Uplink, audio <-chan []byte, opts Options) 
 	res := Result{StartedAt: time.Now()}
 	gate := NewSpeechGate()
 	encBuf := make([]byte, 0, opts.FrameBytes*4)
+	muteBytes := int(opts.MuteHead.Seconds()*gateSampleRate) * 2
+	sentBytes := 0
 
 	noSpeech := time.NewTimer(opts.NoSpeech)
 	defer noSpeech.Stop()
@@ -86,6 +93,7 @@ func Capture(ctx context.Context, up Uplink, audio <-chan []byte, opts Options) 
 		res.Speech = gate.Started()
 		res.Floor = gate.Floor()
 		res.Peak = gate.Peak()
+		res.TalkThr = gate.TalkThreshold()
 	}
 
 loop:
@@ -109,6 +117,10 @@ loop:
 			for len(encBuf) >= opts.FrameBytes {
 				frame := encBuf[:opts.FrameBytes]
 				encBuf = encBuf[opts.FrameBytes:]
+				if sentBytes < muteBytes {
+					frame = make([]byte, opts.FrameBytes)
+				}
+				sentBytes += opts.FrameBytes
 				packet, err := opts.Encode(frame)
 				if err != nil {
 					continue

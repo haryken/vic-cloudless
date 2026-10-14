@@ -50,6 +50,8 @@ type Config struct {
 	// FaceGreetEveryMin: minimum minutes between face greetings; unset = 5,
 	// 0 = no wait (greet whenever someone arrives and no chat is running).
 	FaceGreetEveryMin *int `json:"face_greet_every_min,omitempty"`
+	// TTSGainPct boosts every AI voice before the speaker (100 = as received).
+	TTSGainPct int `json:"tts_gain_pct,omitempty"`
 	// Backend: "xiaozhi" (default), "openai", "gemini" (Gemini Live) or
 	// "grok" (xAI Voice); the direct-API ones read openai.json.
 	Backend string `json:"backend,omitempty"`
@@ -106,6 +108,7 @@ func LoadConfig() Config {
 	}
 	globalCfg = cfg
 	SyncListenVADFlag(cfg)
+	setTTSGain(cfg.TTSGainPct)
 	return cfg
 }
 

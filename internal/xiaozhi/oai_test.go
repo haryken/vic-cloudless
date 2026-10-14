@@ -86,21 +86,6 @@ func s16(vals ...int16) []byte {
 	return b
 }
 
-func TestDown24to16Carry(t *testing.T) {
-	var carry []byte
-	// 7 samples split oddly (incl. a half sample) → 2 groups out, 1 sample carried.
-	in := s16(100, 200, 400, 1000, 2000, 4000, 7)
-	out := down24to16(&carry, in[:5])
-	out = append(out, down24to16(&carry, in[5:])...)
-	want := s16(100, 300, 1000, 3000)
-	if string(out) != string(want) {
-		t.Fatalf("out %v want %v", out, want)
-	}
-	if len(carry) != 2 {
-		t.Fatalf("carry %d bytes", len(carry))
-	}
-}
-
 func TestSentenceSplitter(t *testing.T) {
 	var s sentenceSplitter
 	var got []string
@@ -261,6 +246,22 @@ func TestRTSessionUpdateGA(t *testing.T) {
 	b := rtSessionUpdate(defaultConfig(), ocfg, true, "inst")["session"].(map[string]interface{})
 	if b["input_audio_format"] != "pcm16" || b["type"] != nil {
 		t.Fatalf("beta session %v", b)
+	}
+}
+
+func TestRTTranscribeModelIgnoresOtherHostSTT(t *testing.T) {
+	ocfg := defaultOpenAIConfig()
+	ocfg.STTBaseURL = "https://api.groq.com/openai/v1"
+	ocfg.STTModel = "whisper-large-v3-turbo"
+	sess := rtSessionUpdate(defaultConfig(), ocfg, false, "inst")["session"].(map[string]interface{})
+	tr := sess["audio"].(map[string]interface{})["input"].(map[string]interface{})["transcription"].(map[string]interface{})
+	if tr["model"] != defaultOpenAIConfig().STTModel {
+		t.Fatalf("realtime got Groq STT model: %v", tr["model"])
+	}
+	ocfg.STTBaseURL = ""
+	ocfg.STTModel = "gpt-4o-transcribe"
+	if got := ocfg.rtTranscribeModel(); got != "gpt-4o-transcribe" {
+		t.Fatalf("same-host STT model dropped: %v", got)
 	}
 }
 

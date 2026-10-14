@@ -2,7 +2,6 @@ package xiaozhi
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -192,25 +191,12 @@ func (s *oaiSpeaker) end() {
 	}
 }
 
-// down24to16 converts 24 kHz s16le to 16 kHz (3 samples → 2), carrying the
-// remainder between calls so arbitrary delta sizes stay continuous.
-func down24to16(carry *[]byte, in []byte) []byte {
-	buf := append(*carry, in...)
-	groups := len(buf) / 6
-	out := make([]byte, groups*4)
-	for g := 0; g < groups; g++ {
-		s0 := int16(binary.LittleEndian.Uint16(buf[g*6:]))
-		s1 := int16(binary.LittleEndian.Uint16(buf[g*6+2:]))
-		s2 := int16(binary.LittleEndian.Uint16(buf[g*6+4:]))
-		binary.LittleEndian.PutUint16(out[g*4:], uint16(s0))
-		binary.LittleEndian.PutUint16(out[g*4+2:], uint16(int16((int32(s1)+int32(s2))/2)))
-	}
-	*carry = append((*carry)[:0], buf[groups*6:]...)
-	return out
-}
-
 // oaiMicFrameBytes is one anim mic chunk (120 ms at 16 kHz).
 const oaiMicFrameBytes = 3840
+
+// oaiMicMuteHead covers the relisten earcon; realtime server VAD otherwise
+// hears it as a short utterance and auto-replies to an empty transcript.
+const oaiMicMuteHead = 600 * time.Millisecond
 
 // oaiCapture keeps the mic open until end-of-speech (server VAD for Realtime,
 // local silence for the pipeline). Returns listenvad.ErrNoSpeech on silence.
@@ -222,6 +208,7 @@ func oaiCapture(ctx context.Context, up listenvad.Uplink, audio <-chan []byte, e
 		FrameBytes:  oaiMicFrameBytes,
 		Encode:      func(p []byte) ([]byte, error) { return append([]byte(nil), p...), nil },
 		EndOfSpeech: endOfSpeech,
+		MuteHead:    oaiMicMuteHead,
 		OnFirstFrame: func() {
 			MarkMicUplink()
 			log.Println("[OpenAI][Mic] first uplink frame")
@@ -230,8 +217,8 @@ func oaiCapture(ctx context.Context, up listenvad.Uplink, audio <-chan []byte, e
 	switch {
 	case err == nil, errors.Is(err, listenvad.ErrNoSpeech):
 		MarkMicListenEnded()
-		log.Printf("[OpenAI][Mic] listen end (%s) — %d frames, %v, speech=%v floor=%.0f peak=%.0f",
-			res.Reason, res.Frames, res.Duration.Round(time.Millisecond), res.Speech, res.Floor, res.Peak)
+		log.Printf("[OpenAI][Mic] listen end (%s) — %d frames, %v, speech=%v floor=%.0f peak=%.0f talk_thr=%.0f",
+			res.Reason, res.Frames, res.Duration.Round(time.Millisecond), res.Speech, res.Floor, res.Peak, res.TalkThr)
 		return res, err
 	case errors.Is(err, listenvad.ErrNoUplink):
 		log.Printf("[OpenAI] no mic audio for %v after listen start", res.Duration.Round(time.Millisecond))

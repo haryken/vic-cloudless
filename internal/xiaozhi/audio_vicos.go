@@ -5,6 +5,7 @@ package xiaozhi
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 
 	"gopkg.in/hraban/opus.v2"
@@ -59,7 +60,9 @@ func (e *Encoder) EncodeFrame(pcmBytes []byte) ([]byte, error) {
 
 // Decoder wraps an Opus decoder for server TTS 24kHz → PCM.
 type Decoder struct {
-	dec *opus.Decoder
+	dec    *opus.Decoder
+	reduce float64
+	hot    bool
 }
 
 // NewDecoder creates a 24kHz mono Opus decoder for server TTS audio.
@@ -68,20 +71,31 @@ func NewDecoder() (*Decoder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opus decoder: %w", err)
 	}
-	return &Decoder{dec: dec}, nil
+	return &Decoder{dec: dec, reduce: 1}, nil
 }
 
-// DecodeFrame decodes an Opus frame to 24kHz PCM s16le bytes.
+// DecodeFrame decodes an Opus frame to 24kHz PCM s16le bytes. Server TTS is
+// mastered near full scale and Opus overshoots it on loud syllables; decoding
+// to float and limiting avoids the hard int16 clipping that sounds rè/metallic.
 func (d *Decoder) DecodeFrame(opusData []byte) ([]byte, error) {
-	pcm := make([]int16, DecFrameSamples)
-	n, err := d.dec.Decode(opusData, pcm)
+	pcm := make([]float32, DecFrameSamples)
+	n, err := d.dec.DecodeFloat32(opusData, pcm)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, n*2)
-	for i := 0; i < n; i++ {
-		binary.LittleEndian.PutUint16(out[i*2:], uint16(pcm[i]))
+	in := make([]float64, n)
+	peak := 0.0
+	for i := range in {
+		in[i] = float64(pcm[i]) * 32768
+		peak = math.Max(peak, math.Abs(in[i]))
 	}
+	if peak > 32767 && !d.hot {
+		d.hot = true
+		log.Printf("[Xiaozhi][TTS] server audio peaks %.2f dB over full scale — limiting instead of clipping",
+			20*math.Log10(peak/32767))
+	}
+	var out []byte
+	out, d.reduce = limitSamples(in, d.reduce)
 	return out, nil
 }
 

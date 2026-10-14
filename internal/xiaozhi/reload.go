@@ -1,6 +1,7 @@
 package xiaozhi
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,10 +42,33 @@ func StartConfigReloadWatcher() {
 	go watchConfigReload()
 }
 
+// appliedRoute is the reloadRoute last applied (or loaded at startup).
+var appliedRoute string
+
+// reloadRoute names which voice agent answers. Other direct-API settings
+// (keys, voice, models, prompt) are read fresh by the next turn, so saving
+// them needs no interrupt or greeting.
+func reloadRoute(cfg Config, openAIMode string) string {
+	if cfg.Backend != BackendOpenAI {
+		openAIMode = ""
+	}
+	return fmt.Sprintf("%v|%s|%s|%s|%s|%s|%s", cfg.Enabled, cfg.Backend, openAIMode,
+		cfg.IdentityMode, cfg.DeviceID, cfg.ClientID, cfg.Endpoint)
+}
+
+func currentRoute(cfg Config) string {
+	return reloadRoute(cfg, LoadOpenAIConfig().Mode)
+}
+
+func sameDirectRoute(prev, next string, cfg Config) bool {
+	return prev != "" && prev == next && cfg.Enabled && IsDirectAPIBackend(cfg.Backend)
+}
+
 func watchConfigReload() {
 	t := time.NewTicker(reloadPoll)
 	defer t.Stop()
 	var requestedAt time.Time
+	appliedRoute = currentRoute(LoadConfig())
 	for range t.C {
 		if _, err := os.Stat(ReloadFlagPath); err == nil {
 			_ = os.Remove(ReloadFlagPath)
@@ -65,6 +89,12 @@ func applyConfigReload() {
 	noteConversation()
 	prev := GetConfig()
 	cfg := LoadConfig()
+	route := currentRoute(cfg)
+	if sameDirectRoute(appliedRoute, route, cfg) {
+		log.Printf("[Xiaozhi][Reload] same AI mode (%s) — new settings apply from the next turn, no interrupt", cfg.Backend)
+		return
+	}
+	appliedRoute = route
 	log.Printf("[Xiaozhi][Reload] applying: enabled %v→%v backend %q→%q identity %q→%q device %s→%s",
 		prev.Enabled, cfg.Enabled, prev.Backend, cfg.Backend, prev.IdentityMode, cfg.IdentityMode, prev.DeviceID, cfg.DeviceID)
 

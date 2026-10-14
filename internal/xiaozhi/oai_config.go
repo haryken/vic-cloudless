@@ -164,6 +164,16 @@ func (c OpenAIConfig) sttBase() string {
 	return c.BaseURL
 }
 
+// rtTranscribeModel: stt_model belongs to the pipeline's STT host (e.g. Groq
+// whisper-large-v3-turbo); the realtime server rejects the whole session for
+// a model it does not host, so it only gets stt_model on that same host.
+func (c OpenAIConfig) rtTranscribeModel() string {
+	if c.STTModel != "" && urlHost(c.sttBase()) == urlHost(c.BaseURL) {
+		return c.STTModel
+	}
+	return defaultOpenAIConfig().STTModel
+}
+
 // stageKey: Groq and Gemini have one key each, used by whichever step points
 // at them; a custom server only ever gets its own step key (shared when STT
 // and LLM use the same custom host), never the OpenAI one.

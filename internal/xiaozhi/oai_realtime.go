@@ -158,7 +158,7 @@ func rtSignature(cfg Config, ocfg OpenAIConfig, t rtTarget) string {
 		names = append(names, s.Name)
 	}
 	return strings.Join([]string{t.key, t.url, t.voice,
-		ocfg.Language, ocfg.Instructions, ocfg.STTModel, strings.Join(names, ",")}, "|")
+		ocfg.Language, ocfg.Instructions, ocfg.rtTranscribeModel(), strings.Join(names, ",")}, "|")
 }
 
 // grokNoSearch remembers models whose session refused the web_search tool.
@@ -208,7 +208,7 @@ func rtSessionUpdate(cfg Config, ocfg OpenAIConfig, beta bool, instructions stri
 		// Vector's mic is closed while it speaks; barge-in is the wake word.
 		"interrupt_response": false,
 	}
-	transcription := map[string]interface{}{"model": ocfg.STTModel}
+	transcription := map[string]interface{}{"model": ocfg.rtTranscribeModel()}
 	if lang := ocfg.sttLanguage(); lang != "" {
 		transcription["language"] = lang
 	}
@@ -462,7 +462,7 @@ func runRealtimeTurn(ctx context.Context, audio <-chan []byte, cfg Config, ocfg 
 }
 
 func rtAwaitResponse(ctx context.Context, c *rtConn, detect bool, st *oaiTurnState) error {
-	var carry []byte
+	var down down24to16
 	followUp := false
 	responding := false
 	audioMuted := false
@@ -501,7 +501,7 @@ func rtAwaitResponse(ctx context.Context, c *rtConn, detect bool, st *oaiTurnSta
 					continue
 				}
 				first := !st.speaker.started
-				if err := st.speaker.write(down24to16(&carry, raw)); err != nil {
+				if err := st.speaker.write(down.Process(raw)); err != nil {
 					log.Println(c.tag, "speaker:", err)
 					audioMuted = true
 					_ = c.send(map[string]interface{}{"type": "response.cancel"})
