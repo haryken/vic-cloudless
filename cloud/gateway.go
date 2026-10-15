@@ -137,13 +137,30 @@ func cleanExit() {
 	os.Exit(0)
 }
 
+// gatewayFileWait covers the first boot after an OTA, when vic-gateway-cert is
+// still generating the cert while vic-cloud starts; exiting then shows fault 923.
+const gatewayFileWait = 60 * time.Second
+
+func waitForFile(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func mainGateway() {
 
-	if _, err := os.Stat(robot.GatewayCert); os.IsNotExist(err) {
+	if !waitForFile(robot.GatewayCert, gatewayFileWait) {
 		log.Println("Cannot find cert:", robot.GatewayCert)
 		os.Exit(1)
 	}
-	if _, err := os.Stat(robot.GatewayKey); os.IsNotExist(err) {
+	if !waitForFile(robot.GatewayKey, gatewayFileWait) {
 		log.Println("Cannot find key: ", robot.GatewayKey)
 		os.Exit(1)
 	}
