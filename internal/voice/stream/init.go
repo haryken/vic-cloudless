@@ -388,7 +388,7 @@ func (strm *Streamer) runXiaozhiTurn() {
 				xiaozhi.SetPlaying(false)
 				time.Sleep(cool)
 			}
-			time.Sleep(350 * time.Millisecond)
+			time.Sleep(80 * time.Millisecond)
 			// Re-check: idle/goodbye may have closed WSS while we waited for speaker.
 			if !xiaozhi.SessionAlive() {
 				xiaozhi.DisarmRelistenPending()

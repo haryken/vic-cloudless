@@ -56,11 +56,12 @@ var (
 	alsaWriter    *os.File
 	alsaPCMCh     chan []byte
 	alsaDone      chan struct{}
-	alsaBytes     int64
+	alsaBytes        int64
+	alsaRealBytes    int64 // speech only — excludes gap-keepalive silence
 	alsaPendingBytes int64 // PCM enqueued but not yet written to FIFO
-	alsaReady     atomic.Bool
-	mixerReady    atomic.Bool
-	alsaKeepalive atomic.Bool
+	alsaReady        atomic.Bool
+	mixerReady       atomic.Bool
+	alsaKeepalive    atomic.Bool
 )
 
 // UseAlsaPlayback reports whether Xiaozhi TTS should go to ALSA (Plan B).
@@ -120,6 +121,7 @@ func alsaKillLocked() {
 	alsaWriter = nil
 	alsaDone = nil
 	alsaBytes = 0
+	alsaRealBytes = 0
 	alsaPendingBytes = 0
 	alsaReady.Store(false)
 	_ = os.Remove(alsaFIFOPath)
@@ -174,6 +176,7 @@ func alsaStart() error {
 	alsaPCMCh = pcmCh
 	alsaDone = done
 	alsaBytes = 0
+	alsaRealBytes = 0
 	alsaPendingBytes = 0
 	alsaReady.Store(true)
 	alsaKeepalive.Store(true)
@@ -220,7 +223,7 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 		maxGapPad       = 60 * time.Second
 	)
 
-	writeFIFO := func(pcm []byte) error {
+	writeFIFO := func(pcm []byte, realSpeech bool) error {
 		if len(pcm) == 0 {
 			return nil
 		}
@@ -228,6 +231,9 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 		if n > 0 {
 			alsaMu.Lock()
 			alsaBytes += int64(n)
+			if realSpeech {
+				alsaRealBytes += int64(n)
+			}
 			if alsaPendingBytes >= int64(n) {
 				alsaPendingBytes -= int64(n)
 			} else {
@@ -256,7 +262,7 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 			}
 			lastRealPCM = time.Now()
 			gapLogged = false
-			if err := writeFIFO(pcm); err != nil {
+			if err := writeFIFO(pcm, true); err != nil {
 				log.Println("[Xiaozhi][ALSA] write:", err)
 				return
 			}
@@ -278,12 +284,14 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 			}
 			// Burst a bit of silence to refill the ring before drips keep pace.
 			// First tick after threshold: ~256ms; then regular keepalive chunks.
+			// Keepalive must NOT count as speech for WaitPlaybackIdle, or the
+			// mic stays closed for seconds after the last real word.
 			burst := silence
 			if idle < minGapBeforePad+alsaKeepaliveEvery*2 {
 				big := make([]byte, alsaKeepaliveBytes*4) // ~256ms
 				burst = big
 			}
-			if err := writeFIFO(burst); err != nil {
+			if err := writeFIFO(burst, false); err != nil {
 				log.Println("[Xiaozhi][ALSA] keepalive write:", err)
 				return
 			}
@@ -326,6 +334,13 @@ func alsaBytesWritten() int64 {
 	alsaMu.Lock()
 	defer alsaMu.Unlock()
 	return alsaBytes
+}
+
+// alsaRealBytesWritten is speech PCM only (excludes gap-keepalive silence).
+func alsaRealBytesWritten() int64 {
+	alsaMu.Lock()
+	defer alsaMu.Unlock()
+	return alsaRealBytes
 }
 
 // alsaEnd closes the PCM queue so the pump drains to tinyplay then exits.

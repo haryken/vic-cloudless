@@ -277,9 +277,11 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	streamEnded := false
 	headPadDone := false // Plan A: one head silence pad per stream before real PCM
 	// Soft-cap continuous server TTS. If no Opus for a while the cloud often
-	// stalled without TTSStop (listener stuck in silence keepalive). Tool/
-	// search gaps rarely exceed ~12s; was 45s and felt like mic "never opens".
+	// stalled without TTSStop (listener stuck in silence keepalive).
+	// First-audio wait stays generous; after speech has started, end sooner
+	// so the mic reopens quickly when TTSStop is late on later turns.
 	const ttsIdleGap = 12 * time.Second
+	const ttsAfterAudioIdle = 1200 * time.Millisecond
 	const ttsAbsoluteMax = 250 * time.Second
 	const ttsSoftCapPCMBytes = 250 * 16000 * 2 // ~250s of 16kHz s16le
 	ttsAbsoluteDeadline := time.After(ttsAbsoluteMax)
@@ -697,8 +699,14 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 			if lastAudioAt.IsZero() {
 				continue
 			}
-			if time.Since(lastAudioAt) > ttsIdleGap {
-				log.Printf("[Xiaozhi] TTS idle %v since last audio — ending stream (partial ok)", ttsIdleGap)
+			// After real Opus: short idle so a late TTSStop does not leave the
+			// mic closed for seconds. Hold longer while an MCP tool may resume TTS.
+			idleLimit := ttsAfterAudioIdle
+			if _, _, ok := PeekMCPIntentQueued(); ok {
+				idleLimit = 8 * time.Second
+			}
+			if time.Since(lastAudioAt) > idleLimit {
+				log.Printf("[Xiaozhi] TTS idle %v since last audio — ending stream (partial ok)", idleLimit)
 				ClearAwaitPostCaptureStream()
 				abortServerTTS("idle_timeout")
 				ttsStopped = true

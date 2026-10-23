@@ -437,6 +437,11 @@ func WaitPlaybackIdle(pcmBytes int, audioStartedAt time.Time, maxWait time.Durat
 		pcmDur = time.Duration(pcmBytes/32) * time.Millisecond
 	}
 	margin := 600 * time.Millisecond
+	if UseAlsaPlayback() {
+		// ALSA path: open mic soon after the last real sample (HW ring is
+		// cancelled once past this floor). Non-ALSA keeps the longer margin.
+		margin = 250 * time.Millisecond
+	}
 	var earliest time.Time
 	if !audioStartedAt.IsZero() && pcmDur > 0 {
 		earliest = audioStartedAt.Add(pcmDur + margin)
@@ -446,12 +451,10 @@ func WaitPlaybackIdle(pcmBytes int, audioStartedAt time.Time, maxWait time.Durat
 
 	stuckGrace := 3 * time.Second
 	if UseAlsaPlayback() {
-		// ALSA path owns tinyplay: once the player is gone the room is quiet.
-		// Do NOT hold the mic closed for a theoretical PCM floor after the
-		// player already exited — that caused multi-second "audio done but
-		// mic still off" after long TTS / tool gaps. (Floor still used while
-		// AlsaActive to avoid cutting mid-tail.)
-		stuckGrace = 4 * time.Second
+		// After the last real word (+ margin), leftover ALSA buffer is usually
+		// gap-keepalive silence. Kill quickly so the mic reopens smoothly
+		// instead of waiting seconds of digital zero.
+		stuckGrace = 350 * time.Millisecond
 	}
 	stuckBusyDeadline := earliest.Add(stuckGrace)
 	deadline := time.Now().Add(maxWait)
@@ -464,10 +467,10 @@ func WaitPlaybackIdle(pcmBytes int, audioStartedAt time.Time, maxWait time.Durat
 				SetPlaying(false)
 				return true
 			}
-			// Still playing: refresh stuck deadline from bytes actually fed so
-			// tool-gap silence counted in alsaBytes can extend patience.
+			// Extend floor from speech PCM only — keepalive silence must not
+			// push the mic-open deadline out by seconds on later turns.
 			if !audioStartedAt.IsZero() {
-				if fed := alsaBytesWritten(); fed > 0 {
+				if fed := alsaRealBytesWritten(); fed > 0 {
 					fedEarliest := audioStartedAt.Add(time.Duration(fed/32)*time.Millisecond + 200*time.Millisecond)
 					if fedEarliest.After(earliest) {
 						earliest = fedEarliest
@@ -475,18 +478,18 @@ func WaitPlaybackIdle(pcmBytes int, audioStartedAt time.Time, maxWait time.Durat
 					}
 				}
 			}
-			// If we have been feeding only keepalives past soft deadline, kill.
+			// Past real-audio floor (+ short HW grace): stop player for fast mic.
 			if !time.Now().Before(stuckBusyDeadline) {
 				if !loggedStuck {
-					log.Println("[Xiaozhi][ALSA] drain stuck after feed floor — killing for relisten")
+					log.Println("[Xiaozhi][ALSA] real-audio floor reached — ending player for fast mic reopen")
 					loggedStuck = true
 				}
 				AlsaCancel()
 				SetPlaying(false)
-				time.Sleep(80 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 				return false
 			}
-			time.Sleep(30 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 			continue
 		}
 
