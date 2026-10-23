@@ -36,12 +36,12 @@ const (
 	alsaDevice   = "1"
 	alsaRate     = "16000"
 	alsaChannels = "1"
-	alsaPeriod   = "1024"
-	// Default tinyplay -n is 2 → buffer 2048 @ 16kHz (~128ms). Too small on
-	// Vector while Wwise holds MM1; underruns sound like crackle ("rè").
-	// 40 periods ≈ ~2.5s at 16kHz/1024 — covers tool/LLM stalls until
-	// keepalive kicks (~350ms idle) without underrunning mid-sentence.
-	alsaPeriodCount = "40"
+	// This tinyplay ignores -n. The driver sets buffer_size = 2 * period.
+	// -p 8192 (~1s ring) made every syllable crackle on the Q6 DSP.
+	// -p 1024 is the ring that stayed clear (~128ms); a server gap can
+	// still cause one light hitch.
+	alsaPeriod      = "1024"
+	alsaPeriodCount = "4"
 	alsaMixerMM2    = "PRI_MI2S_RX Audio Mixer MultiMedia2"
 	alsaQueueCap    = 512
 	// Keepalive silence while TTS is armed but Opus pauses (MCP/tool wait).
@@ -166,7 +166,7 @@ func alsaStart() error {
 	if err := cmd.Start(); err != nil {
 		_ = w.Close()
 		_ = os.Remove(alsaFIFOPath)
-		return fmt.Errorf("tinyplay start: %w", err)
+		return fmt.Errorf("player start: %w", err)
 	}
 
 	pcmCh := make(chan []byte, alsaQueueCap)
@@ -183,7 +183,7 @@ func alsaStart() error {
 
 	go alsaPump(w, pcmCh, done, cmd)
 
-	log.Println("[Xiaozhi][ALSA] tinyplay started (MM2 16k mono, buffer ~2.5s, gap keepalive on)")
+	log.Println("[Xiaozhi][ALSA] tinyplay started (MM2 16k mono, period 1024, gap keepalive on)")
 	return nil
 }
 
@@ -214,12 +214,10 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 
 	var lastRealPCM time.Time
 	var gapLogged bool
-	// Opus frames arrive ~20–60ms; inter-sentence gaps often 200–800ms.
-	// Hardware buffer (~2.5s) covers short gaps without pad. Pad earlier
-	// than that (~350ms) so tool/LLM stalls never hit underrun (underrun =
-	// giật rè). Digital zero after real PCM is continuous if we never run dry.
+	// Ring is ~128ms, so a long server pause can hitch once. Do not pad
+	// the 200–700ms gaps between sentences; that silence was the hitch.
 	const (
-		minGapBeforePad = 350 * time.Millisecond
+		minGapBeforePad = 2 * time.Second
 		maxGapPad       = 60 * time.Second
 	)
 
@@ -282,16 +280,9 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 					idle.Round(time.Millisecond))
 				gapLogged = true
 			}
-			// Burst a bit of silence to refill the ring before drips keep pace.
-			// First tick after threshold: ~256ms; then regular keepalive chunks.
-			// Keepalive must NOT count as speech for WaitPlaybackIdle, or the
-			// mic stays closed for seconds after the last real word.
-			burst := silence
-			if idle < minGapBeforePad+alsaKeepaliveEvery*2 {
-				big := make([]byte, alsaKeepaliveBytes*4) // ~256ms
-				burst = big
-			}
-			if err := writeFIFO(burst, false); err != nil {
+			// Small drips only. A 256ms burst became an audible hole before
+			// the next sentence. Keepalive must NOT count as speech.
+			if err := writeFIFO(silence, false); err != nil {
 				log.Println("[Xiaozhi][ALSA] keepalive write:", err)
 				return
 			}
@@ -367,7 +358,7 @@ func alsaEnd() error {
 		alsaReady.Store(false)
 		return nil
 	}
-	// Drain remaining queue + HW ring (~2.5s) + tinyplay exit.
+	// Drain remaining queue + HW ring (~128ms) + tinyplay exit.
 	// A fixed 3s cap was killing Google VI / longer comments mid-sentence
 	// (log: "drain wait timed out — killing tinyplay" after ~3s).
 	// Scale wait with how much PCM still pending in the pump queue.
@@ -375,7 +366,7 @@ func alsaEnd() error {
 	pending := alsaPendingBytes
 	alsaMu.Unlock()
 
-	// 16 kHz mono s16le → 32000 bytes/sec. Add HW buffer (~2.5s) + slop.
+	// 16 kHz mono s16le → 32000 bytes/sec. Add HW buffer (~128ms) + slop.
 	est := time.Duration(pending)*time.Second/32000 + 5*time.Second
 	if est < 10*time.Second {
 		est = 10 * time.Second
