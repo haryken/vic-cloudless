@@ -36,12 +36,12 @@ const (
 	alsaDevice   = "1"
 	alsaRate     = "16000"
 	alsaChannels = "1"
-	// This tinyplay ignores -n. The driver sets buffer_size = 2 * period.
-	// -p 8192 (~1s ring) made every syllable crackle on the Q6 DSP.
-	// -p 1024 is the ring that stayed clear (~128ms); a server gap can
-	// still cause one light hitch.
+	// tinyplay on this robot ignores -n. The driver ring is 2 * period
+	// (~128ms at 1024). The old keepalive (350ms, then a 256ms refill)
+	// is what kept later sentences from crackling. Do not raise -p:
+	// 8192 made every syllable crackle.
 	alsaPeriod      = "1024"
-	alsaPeriodCount = "4"
+	alsaPeriodCount = "40"
 	alsaMixerMM2    = "PRI_MI2S_RX Audio Mixer MultiMedia2"
 	alsaQueueCap    = 512
 	// Keepalive silence while TTS is armed but Opus pauses (MCP/tool wait).
@@ -214,10 +214,12 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 
 	var lastRealPCM time.Time
 	var gapLogged bool
-	// Ring is ~128ms, so a long server pause can hitch once. Do not pad
-	// the 200–700ms gaps between sentences; that silence was the hitch.
+	// Opus frames arrive ~20–60ms; inter-sentence gaps often 200–800ms.
+	// The real ring is only ~128ms, so pad at 350ms or the rest of the
+	// sentence underruns and crackles. The first word stays fast because
+	// ArmStreamWithSilencePrime no longer plays a 246ms head pad.
 	const (
-		minGapBeforePad = 2 * time.Second
+		minGapBeforePad = 350 * time.Millisecond
 		maxGapPad       = 60 * time.Second
 	)
 
@@ -280,9 +282,16 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 					idle.Round(time.Millisecond))
 				gapLogged = true
 			}
-			// Small drips only. A 256ms burst became an audible hole before
-			// the next sentence. Keepalive must NOT count as speech.
-			if err := writeFIFO(silence, false); err != nil {
+			// Burst a bit of silence to refill the ring before drips keep pace.
+			// First tick after threshold: ~256ms; then regular keepalive chunks.
+			// Keepalive must NOT count as speech for WaitPlaybackIdle, or the
+			// mic stays closed for seconds after the last real word.
+			burst := silence
+			if idle < minGapBeforePad+alsaKeepaliveEvery*2 {
+				big := make([]byte, alsaKeepaliveBytes*4) // ~256ms
+				burst = big
+			}
+			if err := writeFIFO(burst, false); err != nil {
 				log.Println("[Xiaozhi][ALSA] keepalive write:", err)
 				return
 			}
