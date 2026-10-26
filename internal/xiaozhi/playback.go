@@ -526,14 +526,22 @@ func ArmStreamWithSilencePrime() (primeBytes int, err error) {
 		if err := alsaStart(); err != nil {
 			return 0, err
 		}
-		// One 32ms period opens the FIFO. The old 3 chunks + 150ms head pad
-		// (~246ms) played as silence before the first word.
 		silence := make([]byte, SilencePrimeChunkBytes)
-		if _, err := alsaWrite(silence); err != nil {
-			AlsaCancel()
-			return primeBytes, fmt.Errorf("alsa silence prime: %w", err)
+		for i := 0; i < SilencePrimeChunks; i++ {
+			if _, err := alsaWrite(silence); err != nil {
+				AlsaCancel()
+				return primeBytes, fmt.Errorf("alsa silence prime %d: %w", i+1, err)
+			}
+			primeBytes += SilencePrimeChunkBytes
 		}
-		primeBytes += SilencePrimeChunkBytes
+		if HeadPadSilenceBytes > 0 {
+			pad := make([]byte, HeadPadSilenceBytes)
+			if _, err := alsaWrite(pad); err != nil {
+				AlsaCancel()
+				return primeBytes, fmt.Errorf("alsa head pad: %w", err)
+			}
+			primeBytes += HeadPadSilenceBytes
+		}
 		log.Printf("[Xiaozhi][ALSA] armed (prime=%dB) — ExternalAudio skipped", primeBytes)
 		return primeBytes, nil
 	}

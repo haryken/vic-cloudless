@@ -36,11 +36,11 @@ const (
 	alsaDevice   = "1"
 	alsaRate     = "16000"
 	alsaChannels = "1"
-	// tinyplay on this robot ignores -n. The driver ring is 2 * period
-	// (~128ms at 1024). The old keepalive (350ms, then a 256ms refill)
-	// is what kept later sentences from crackling. Do not raise -p:
-	// 8192 made every syllable crackle.
-	alsaPeriod      = "1024"
+	alsaPeriod   = "1024"
+	// Default tinyplay -n is 2 → buffer 2048 @ 16kHz (~128ms). Too small on
+	// Vector while Wwise holds MM1; underruns sound like crackle ("rè").
+	// 40 periods ≈ ~2.5s at 16kHz/1024 — covers tool/LLM stalls until
+	// keepalive kicks (~350ms idle) without underrunning mid-sentence.
 	alsaPeriodCount = "40"
 	alsaMixerMM2    = "PRI_MI2S_RX Audio Mixer MultiMedia2"
 	alsaQueueCap    = 512
@@ -166,7 +166,7 @@ func alsaStart() error {
 	if err := cmd.Start(); err != nil {
 		_ = w.Close()
 		_ = os.Remove(alsaFIFOPath)
-		return fmt.Errorf("player start: %w", err)
+		return fmt.Errorf("tinyplay start: %w", err)
 	}
 
 	pcmCh := make(chan []byte, alsaQueueCap)
@@ -183,7 +183,7 @@ func alsaStart() error {
 
 	go alsaPump(w, pcmCh, done, cmd)
 
-	log.Println("[Xiaozhi][ALSA] tinyplay started (MM2 16k mono, period 1024, gap keepalive on)")
+	log.Println("[Xiaozhi][ALSA] tinyplay started (MM2 16k mono, buffer ~2.5s, gap keepalive on)")
 	return nil
 }
 
@@ -215,9 +215,9 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 	var lastRealPCM time.Time
 	var gapLogged bool
 	// Opus frames arrive ~20–60ms; inter-sentence gaps often 200–800ms.
-	// The real ring is only ~128ms, so pad at 350ms or the rest of the
-	// sentence underruns and crackles. The first word stays fast because
-	// ArmStreamWithSilencePrime no longer plays a 246ms head pad.
+	// Hardware buffer (~2.5s) covers short gaps without pad. Pad earlier
+	// than that (~350ms) so tool/LLM stalls never hit underrun (underrun =
+	// giật rè). Digital zero after real PCM is continuous if we never run dry.
 	const (
 		minGapBeforePad = 350 * time.Millisecond
 		maxGapPad       = 60 * time.Second
@@ -367,7 +367,7 @@ func alsaEnd() error {
 		alsaReady.Store(false)
 		return nil
 	}
-	// Drain remaining queue + HW ring (~128ms) + tinyplay exit.
+	// Drain remaining queue + HW ring (~2.5s) + tinyplay exit.
 	// A fixed 3s cap was killing Google VI / longer comments mid-sentence
 	// (log: "drain wait timed out — killing tinyplay" after ~3s).
 	// Scale wait with how much PCM still pending in the pump queue.
@@ -375,7 +375,7 @@ func alsaEnd() error {
 	pending := alsaPendingBytes
 	alsaMu.Unlock()
 
-	// 16 kHz mono s16le → 32000 bytes/sec. Add HW buffer (~128ms) + slop.
+	// 16 kHz mono s16le → 32000 bytes/sec. Add HW buffer (~2.5s) + slop.
 	est := time.Duration(pending)*time.Second/32000 + 5*time.Second
 	if est < 10*time.Second {
 		est = 10 * time.Second
