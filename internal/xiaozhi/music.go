@@ -63,6 +63,9 @@ type musicState struct {
 	pending      *music.Prepared
 	pendingTimer *time.Timer
 	playing      *music.Playback
+	// hold is set for the whole song, including the moment before playing is
+	// assigned, so face greet treats music-only mode as a conversation.
+	hold         bool
 	title        string
 	toolInFlight bool
 	toolDoneAt   time.Time
@@ -213,6 +216,10 @@ func StartPendingMusic(reason string) bool {
 		return false
 	}
 	log.Printf("[Xiaozhi][Music] start %q (%s) — closing WSS for music-only mode", p.Track.Title, reason)
+	mus.mu.Lock()
+	mus.hold = true
+	mus.mu.Unlock()
+	noteConversation()
 	DisarmRelistenPending()
 	ClearPendingMCPIntent("music start")
 	CloseSession()
@@ -225,6 +232,9 @@ func StartPendingMusic(reason string) bool {
 	pb, err := p.Play(musicFIFOPath)
 	if err != nil {
 		log.Println("[Xiaozhi][Music] player start failed:", err)
+		mus.mu.Lock()
+		mus.hold = false
+		mus.mu.Unlock()
 		go runMusicDetect(MusicDetectFailed)
 		return true
 	}
@@ -243,6 +253,7 @@ func watchMusic(pb *music.Playback, title string) {
 	if mus.playing == pb {
 		mus.playing = nil
 		mus.title = ""
+		mus.hold = false
 	}
 	mus.mu.Unlock()
 	played := time.Since(start).Round(time.Second)
@@ -258,11 +269,13 @@ func watchMusic(pb *music.Playback, title string) {
 	}
 }
 
-// MusicPlaying reports whether a device song is on the speaker.
+// MusicPlaying reports whether a device song is on the speaker (or about to be).
+// Face greet uses this as "conversation open": the WSS is closed on purpose
+// during music-only mode, but a greeting must not start and cut the song.
 func MusicPlaying() bool {
 	mus.mu.Lock()
 	defer mus.mu.Unlock()
-	return mus.playing != nil
+	return mus.hold || mus.playing != nil
 }
 
 // StopMusic stops the device song and drops any found-but-unplayed one.
@@ -273,6 +286,7 @@ func StopMusic(reason string) bool {
 	pb, title := mus.playing, mus.title
 	mus.playing = nil
 	mus.title = ""
+	mus.hold = false
 	mus.mu.Unlock()
 	if p != nil {
 		log.Printf("[Xiaozhi][Music] dropped found song %q (%s)", p.Track.Title, reason)
@@ -293,6 +307,13 @@ func runMusicDetect(text string) { runWakeDetect("[Xiaozhi][Music]", text) }
 func runWakeDetect(tag, text string) {
 	if IsBusy() {
 		log.Printf("%s skip detect %q — a turn is already active", tag, text)
+		return
+	}
+	// Song-end detect runs only after watchMusic clears the hold. A face
+	// greeting (or a reload greet) must not open a turn while the song is up:
+	// that turn's speaker steals MultiMedia2 and cuts the music.
+	if MusicPlaying() {
+		log.Printf("%s skip detect %q — music playing", tag, text)
 		return
 	}
 	var result *TurnResult

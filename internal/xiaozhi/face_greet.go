@@ -54,6 +54,10 @@ func faceArrivalDue(now time.Time) bool {
 		return false
 	case !face.lastTalk.IsZero() && now.Sub(face.lastTalk) < faceQuietAfter:
 		return false
+	case MusicPlaying():
+		// Music-only mode has no WSS, so it is not "conversation open", but
+		// the song is the current activity. Do not claim a greeting.
+		return false
 	}
 	face.greeting = true
 	return true

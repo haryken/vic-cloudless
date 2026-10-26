@@ -90,6 +90,25 @@ func TestFaceGreetNoWaitStillNeedsArrival(t *testing.T) {
 	}
 }
 
+func TestFaceArrivalSkipsWhileMusicPlaying(t *testing.T) {
+	resetFaceState()
+	mus.mu.Lock()
+	mus.hold = true
+	mus.mu.Unlock()
+	t.Cleanup(func() {
+		mus.mu.Lock()
+		mus.hold = false
+		mus.playing = nil
+		mus.mu.Unlock()
+	})
+	if faceGreetBlocked() != "music playing" {
+		t.Fatalf("music should count as busy, got %q", faceGreetBlocked())
+	}
+	if faceArrivalDue(time.Now()) {
+		t.Fatal("must not greet while a song is playing")
+	}
+}
+
 func TestFaceSkipsRightAfterConversation(t *testing.T) {
 	resetFaceState()
 	t0 := time.Now()

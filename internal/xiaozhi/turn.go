@@ -59,6 +59,13 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	// do NOT tie turnCancel to strm.ctx: afterSTT→OnIntent closes the streamer
 	// and would abort TTS before playback (false "barge-in").
 	_ = ctx
+	// Face greet sends detect text. Do not dial or open the speaker while a
+	// YouTube song is playing — that steals MultiMedia2 and cuts the song.
+	// Hey Vector (empty detect) still stops the song below.
+	if detectText != "" && MusicPlaying() {
+		log.Printf("[Xiaozhi] skip detect %q — music playing", detectText)
+		return nil, ErrAborted
+	}
 	if IsDirectAPIBackend(cfg.Backend) {
 		return runOpenAITurn(audioStream, cfg, afterSTT, detectText)
 	}
