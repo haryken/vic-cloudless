@@ -288,11 +288,17 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	// First-audio wait stays generous; after speech has started, end sooner
 	// so the mic reopens quickly when TTSStop is late on later turns.
 	const ttsIdleGap = 12 * time.Second
-	// 1.2s cut a story mid-sentence: the server paused, then sent more Opus
-	// which was discarded ("stale reply discard"). 8s still ends a dead stream.
-	const ttsAfterAudioIdle = 8 * time.Second
-	const ttsAbsoluteMax = 250 * time.Second
-	const ttsSoftCapPCMBytes = 250 * 16000 * 2 // ~250s of 16kHz s16le
+	// 1.2s and 8s both aborted a story while the server was only paused
+	// between chunks (8s fired mid-sentence, then the rest was discarded).
+	// 12s is the gap from before that: long enough for those pauses, still
+	// ends a stream that never sends TTSStop.
+	const ttsAfterAudioIdle = 12 * time.Second
+	// 250s cut every "super long" story while Opus was still arriving
+	// (log: "TTS absolute deadline reached" at ~4m10s, then the mic reopened).
+	// Silence is already ended by ttsAfterAudioIdle. This cap only stops a
+	// stream that never goes quiet.
+	const ttsAbsoluteMax = 20 * time.Minute
+	const ttsSoftCapPCMBytes = 20 * 60 * 16000 * 2 // ~20min of 16kHz s16le
 	ttsAbsoluteDeadline := time.After(ttsAbsoluteMax)
 	idleTicker := time.NewTicker(1 * time.Second)
 	defer idleTicker.Stop()

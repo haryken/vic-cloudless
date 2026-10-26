@@ -37,25 +37,25 @@ const (
 	alsaRate     = "16000"
 	alsaChannels = "1"
 	alsaPeriod   = "1024"
-	// Default tinyplay -n is 2 → buffer 2048 @ 16kHz (~128ms). Too small on
-	// Vector while Wwise holds MM1; underruns sound like crackle ("rè").
-	// 40 periods ≈ ~2.5s at 16kHz/1024 — covers tool/LLM stalls until
-	// keepalive kicks (~350ms idle) without underrunning mid-sentence.
+	// tinyplay rejects -n, so the driver ring stays 2 * period (~128ms at
+	// 1024). Do not raise -p: 2048 plays too fast and 8192 crackles.
 	alsaPeriodCount = "40"
 	alsaMixerMM2    = "PRI_MI2S_RX Audio Mixer MultiMedia2"
 	alsaQueueCap    = 512
-	// Keepalive silence while TTS is armed but Opus pauses (MCP/tool wait).
-	// Larger chunks (≈64ms) reduce write jitter vs 32ms drips.
-	alsaKeepaliveEvery = 48 * time.Millisecond
-	alsaKeepaliveBytes = 2048 // 1024 samples * 2 bytes ≈ 64ms @ 16k
+	// Silence drip only once the 512ms ring is about to run dry. In-sentence
+	// gaps are often 64–110ms and already fit in that ring; dripping there
+	// chops words. A multi-second server pause does not fit, and the DAC
+	// underruns (the hitch) unless silence follows the last real sample.
+	alsaKeepaliveEvery = 8 * time.Millisecond
+	alsaKeepaliveBytes = 256 // 128 frames * 2 bytes = 8ms @ 16kHz mono
 )
 
 var (
-	alsaMu        sync.Mutex
-	alsaCmd       *exec.Cmd
-	alsaWriter    *os.File
-	alsaPCMCh     chan []byte
-	alsaDone      chan struct{}
+	alsaMu           sync.Mutex
+	alsaCmd          *exec.Cmd
+	alsaWriter       *os.File
+	alsaPCMCh        chan []byte
+	alsaDone         chan struct{}
 	alsaBytes        int64
 	alsaRealBytes    int64 // speech only — excludes gap-keepalive silence
 	alsaPendingBytes int64 // PCM enqueued but not yet written to FIFO
@@ -157,7 +157,13 @@ func alsaStart() error {
 		return fmt.Errorf("alsa open fifo: %w", err)
 	}
 
-	cmd := exec.Command("tinyplay", alsaFIFOPath,
+	// xiaozhi-play asks libtinyalsa for 8 periods (512ms) at period 1024.
+	// tinyplay cannot; its ring is 128ms and sentence gaps underrun.
+	player := "/anki/bin/xiaozhi-play"
+	if _, err := os.Stat(player); err != nil {
+		player = "tinyplay"
+	}
+	cmd := exec.Command(player, alsaFIFOPath,
 		"-D", alsaCard, "-d", alsaDevice,
 		"-i", "raw", "-c", alsaChannels, "-r", alsaRate,
 		"-p", alsaPeriod, "-n", alsaPeriodCount)
@@ -179,11 +185,13 @@ func alsaStart() error {
 	alsaRealBytes = 0
 	alsaPendingBytes = 0
 	alsaReady.Store(true)
+	// Pad only after 400ms. The 512ms ring covers shorter holes. Longer
+	// pauses used to underrun once the ring ran dry.
 	alsaKeepalive.Store(true)
 
 	go alsaPump(w, pcmCh, done, cmd)
 
-	log.Println("[Xiaozhi][ALSA] tinyplay started (MM2 16k mono, buffer ~2.5s, gap keepalive on)")
+	log.Printf("[Xiaozhi][ALSA] player started (%s, period 1024 x8, silence after 400ms)", player)
 	return nil
 }
 
@@ -214,12 +222,11 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 
 	var lastRealPCM time.Time
 	var gapLogged bool
-	// Opus frames arrive ~20–60ms; inter-sentence gaps often 200–800ms.
-	// Hardware buffer (~2.5s) covers short gaps without pad. Pad earlier
-	// than that (~350ms) so tool/LLM stalls never hit underrun (underrun =
-	// giật rè). Digital zero after real PCM is continuous if we never run dry.
+	// Start just before the 512ms ring runs dry. Shorter idle is still
+	// covered by audio already queued, so it must not be overwritten
+	// with silence.
 	const (
-		minGapBeforePad = 350 * time.Millisecond
+		minGapBeforePad = 400 * time.Millisecond
 		maxGapPad       = 60 * time.Second
 	)
 
@@ -278,20 +285,12 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 				continue
 			}
 			if !gapLogged {
-				log.Printf("[Xiaozhi][ALSA] gap keepalive after %v idle — silence for tool/LLM pause",
+				log.Printf("[Xiaozhi][ALSA] gap silence after %v idle — holding the 512ms ring",
 					idle.Round(time.Millisecond))
 				gapLogged = true
 			}
-			// Burst a bit of silence to refill the ring before drips keep pace.
-			// First tick after threshold: ~256ms; then regular keepalive chunks.
-			// Keepalive must NOT count as speech for WaitPlaybackIdle, or the
-			// mic stays closed for seconds after the last real word.
-			burst := silence
-			if idle < minGapBeforePad+alsaKeepaliveEvery*2 {
-				big := make([]byte, alsaKeepaliveBytes*4) // ~256ms
-				burst = big
-			}
-			if err := writeFIFO(burst, false); err != nil {
+			// realSpeech=false: drips must not keep the mic closed after the last word.
+			if err := writeFIFO(silence, false); err != nil {
 				log.Println("[Xiaozhi][ALSA] keepalive write:", err)
 				return
 			}
