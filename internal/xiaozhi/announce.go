@@ -143,19 +143,15 @@ func RunChessAnnounceMsg(m chessAnnounceMsg) error {
 }
 
 func relistenAfterChess() {
-	if !ContinuousMode() || InBlackjackGameMode() {
+	if InBlackjackGameMode() || !SessionAlive() {
 		return
 	}
-	if !SessionAlive() {
+	if !ContinuousMode() && !AmbientHold() && !OpenMic() {
 		return
 	}
 	DisarmRelistenPending()
 	time.Sleep(250 * time.Millisecond)
-	if rerr := TriggerRelisten(); rerr != nil {
-		log.Println("[Xiaozhi][Chess] relisten:", rerr)
-	} else {
-		log.Println("[Xiaozhi][Chess] mic reopened after chess comment")
-	}
+	ReopenMicAfterChat("after chess comment")
 }
 
 // ensureChessXiaozhiSession opens or reuses the Xiaozhi WSS so follow-up questions

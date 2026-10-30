@@ -42,10 +42,9 @@ const (
 	alsaPeriodCount = "40"
 	alsaMixerMM2    = "PRI_MI2S_RX Audio Mixer MultiMedia2"
 	alsaQueueCap    = 512
-	// Silence drip only once the 512ms ring is about to run dry. In-sentence
-	// gaps are often 64–110ms and already fit in that ring; dripping there
-	// chops words. A multi-second server pause does not fit, and the DAC
-	// underruns (the hitch) unless silence follows the last real sample.
+	// Silence drip only once the 512ms ring is about to run dry. Sentence
+	// gaps are often ~400ms and still fit in that ring; dripping at 400ms
+	// inserted a hitch (the "vấp") before the next chunk arrived.
 	alsaKeepaliveEvery = 8 * time.Millisecond
 	alsaKeepaliveBytes = 256 // 128 frames * 2 bytes = 8ms @ 16kHz mono
 )
@@ -185,13 +184,13 @@ func alsaStart() error {
 	alsaRealBytes = 0
 	alsaPendingBytes = 0
 	alsaReady.Store(true)
-	// Pad only after 400ms. The 512ms ring covers shorter holes. Longer
-	// pauses used to underrun once the ring ran dry.
+	// Pad only once the 512ms ring is nearly empty. A ~400ms server pause
+	// still has audio queued; dripping there was the audible hitch.
 	alsaKeepalive.Store(true)
 
 	go alsaPump(w, pcmCh, done, cmd)
 
-	log.Printf("[Xiaozhi][ALSA] player started (%s, period 1024 x8, silence after 400ms)", player)
+	log.Printf("[Xiaozhi][ALSA] player started (%s, period 1024 x8, silence after 460ms)", player)
 	return nil
 }
 
@@ -226,7 +225,7 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 	// covered by audio already queued, so it must not be overwritten
 	// with silence.
 	const (
-		minGapBeforePad = 400 * time.Millisecond
+		minGapBeforePad = 460 * time.Millisecond
 		maxGapPad       = 60 * time.Second
 	)
 

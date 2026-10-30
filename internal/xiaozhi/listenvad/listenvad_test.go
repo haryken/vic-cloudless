@@ -328,6 +328,29 @@ func TestCaptureEndOfSpeech(t *testing.T) {
 	}
 }
 
+func TestCaptureZeroTimersStayOpenUntilSTT(t *testing.T) {
+	up := newFakeUplink()
+	audio := make(chan []byte, 10)
+	stop := make(chan struct{})
+	defer close(stop)
+	go micFeed(audio, stop, func(int) float64 { return 0 })
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		up.stt <- "nói nhỏ"
+	}()
+
+	opts := testOpts()
+	opts.NoSpeech = 0
+	opts.MaxListen = 0
+	res, err := Capture(context.Background(), up, audio, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason != ReasonServerSTT || res.STT != "nói nhỏ" || res.Frames == 0 {
+		t.Fatalf("reason %q stt %q frames %d", res.Reason, res.STT, res.Frames)
+	}
+}
+
 func TestCaptureCancelled(t *testing.T) {
 	up := newFakeUplink()
 	audio := make(chan []byte)

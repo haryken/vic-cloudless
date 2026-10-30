@@ -25,6 +25,13 @@ const (
 	StreamEndFlagPath   = "/run/vic-cloud/xiaozhi-stream-end"
 	StreamEndFlagLegacy = "/run/xiaozhi-stream-end"
 	RelistenFlagPath    = "/run/vic-cloud/xiaozhi-relisten"
+	// AmbientFlagPath tells vic-anim to keep a cyan backpack and open a cloud
+	// mic stream on speech without BehaviorReactToVoiceCommand (robot keeps walking).
+	AmbientFlagPath = "/run/vic-cloud/xiaozhi-ambient"
+	// OpenMicModeFlagPath is present the whole time conversation_mode is "open".
+	// OpenMicArmPath asks anim to play the ting and open the mic for one turn.
+	OpenMicModeFlagPath = "/run/vic-cloud/xiaozhi-openmic-mode"
+	OpenMicArmPath      = "/run/vic-cloud/xiaozhi-openmic"
 	RelistenPendingPath = "/run/vic-cloud/xiaozhi-relisten-pending"
 
 	// Balanced window for 426MB Vector (2026-07-15 mitigate pack):
@@ -501,6 +508,97 @@ func DisarmRelistenPending() {
 	_ = os.Remove("/run/xiaozhi-relisten-pending")
 	_ = os.Remove(RelistenFlagPath)
 	_ = os.Remove("/run/xiaozhi-relisten")
+}
+
+// AmbientQuiet is how long the extended mic stays armed with nobody talking.
+// Past this, the backpack goes out and the next turn needs Hey Vector.
+const AmbientQuiet = 3 * time.Minute
+
+// AmbientActive reports the anim hold flag. It is independent of the saved mode
+// so a mode switch can drop the flag without waiting for the next turn.
+func AmbientActive() bool {
+	_, err := os.Stat(AmbientFlagPath)
+	return err == nil
+}
+
+// ArmAmbient starts the walking listen. Rewriting the file resets the quiet timer.
+func ArmAmbient() error {
+	if InBlackjackGameMode() {
+		return nil
+	}
+	DisarmRelistenPending()
+	if err := os.MkdirAll(filepath.Dir(AmbientFlagPath), 0775); err != nil {
+		return err
+	}
+	if err := os.WriteFile(AmbientFlagPath, []byte("1"), 0644); err != nil {
+		return err
+	}
+	// Idle timer otherwise starts when TTS bytes finish, before the speaker
+	// is done, and can close the session early in the hold.
+	MarkActivity()
+	return nil
+}
+
+// DisarmAmbient drops the walking listen. The next utterance needs Hey Vector.
+func DisarmAmbient() {
+	_ = os.Remove(AmbientFlagPath)
+}
+
+// ArmOpenMic asks anim for one ting plus an open mic, with no standing listen.
+func ArmOpenMic() error {
+	if InBlackjackGameMode() {
+		return nil
+	}
+	DisarmRelistenPending()
+	DisarmAmbient()
+	if err := os.MkdirAll(filepath.Dir(OpenMicArmPath), 0775); err != nil {
+		return err
+	}
+	if err := os.WriteFile(OpenMicArmPath, []byte("1"), 0644); err != nil {
+		return err
+	}
+	MarkActivity()
+	return nil
+}
+
+// DisarmOpenMic drops a pending ting. The mode flag stays so the next Hey Vector
+// still uses this path.
+func DisarmOpenMic() {
+	_ = os.Remove(OpenMicArmPath)
+}
+
+// ReopenMicAfterChat continues a conversation. Continuous mode FakeTriggers
+// (Vector stands still). Ambient mode only arms the walking hold. Open mode
+// plays the ting and opens the mic without the standing listen.
+func ReopenMicAfterChat(reason string) {
+	if InBlackjackGameMode() {
+		return
+	}
+	if OpenMic() {
+		if err := ArmOpenMic(); err != nil {
+			log.Println("[Xiaozhi] open-mic arm:", reason, err)
+		} else {
+			log.Println("[Xiaozhi][Mic] open mic —", reason)
+		}
+		return
+	}
+	if AmbientHold() {
+		if err := ArmAmbient(); err != nil {
+			log.Println("[Xiaozhi] ambient arm:", reason, err)
+		} else {
+			log.Println("[Xiaozhi][Mic] ambient hold —", reason)
+		}
+		return
+	}
+	if !ContinuousMode() {
+		return
+	}
+	if err := TriggerRelisten(); err != nil {
+		log.Println("[Xiaozhi] relisten:", reason, err)
+		return
+	}
+	ClearReopenMicAfterBlackjack()
+	log.Println("[Xiaozhi][Mic] relisten —", reason)
 }
 
 // TriggerRelisten writes the relisten flag for continuous conversation.

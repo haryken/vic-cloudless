@@ -67,12 +67,12 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 		return nil, ErrAborted
 	}
 	if IsDirectAPIBackend(cfg.Backend) {
-		return runOpenAITurn(audioStream, cfg, afterSTT, detectText)
+		return runOpenAITurn(audioStream, cfg, afterSTT, ExpandSilencePromptDetect(detectText))
 	}
 	turnCtx, turnCancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer turnCancel()
 
-	keepSession := ContinuousMode()
+	keepSession := PersistentSession()
 	forceClose := false
 	endConversation := false
 

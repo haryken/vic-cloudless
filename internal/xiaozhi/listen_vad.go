@@ -23,8 +23,14 @@ const (
 	// Must stay <= the anim/engine caps used when ListenVADFlagPath exists.
 	vadMaxListen = 30 * time.Second
 
-	// VADStreamTimeout replaces the 9s Vector stream timeout so the stream
-	// outlives the open mic and the intent that closes the listen UI.
+	// ChannelIdleTimeout matches xiaozhi-esp32 Protocol::IsTimeout
+	// (main/protocols/protocol.cc kTimeoutSeconds = 120): no useful
+	// conversation traffic for this long → close the audio channel / WSS.
+	ChannelIdleTimeout = 120 * time.Second
+
+	// VADStreamTimeout replaces the 9s Vector stream timeout for standing
+	// VAD listens (continuous / ambient). Open/gate use Timeout=0 instead —
+	// a 34s deadline was killing quiet open-mic streams (mic_closed @ ~562 frames).
 	VADStreamTimeout = vadMaxListen + 4*time.Second
 )
 
@@ -54,6 +60,55 @@ func SyncListenVADFlag(cfg Config) {
 	_ = os.Remove(ListenVADFlagPath)
 }
 
+// listenTune is how this conversation mode feeds the server.
+type listenTune struct {
+	noSpeech      time.Duration
+	maxListen     time.Duration
+	muteHead      time.Duration
+	minRMS        float64
+	waitSpeech    bool
+	silencePrompt time.Duration
+}
+
+// tuneListen matches continuous unless the mode says otherwise.
+// Open uploads every frame and does not close on the 10s/30s cuts.
+// Gate keeps that wake, but holds audio on the robot until GateRMS.
+// When silence_prompt_sec is on, NoSpeech fires the nudge before MaxListen
+// closes the channel (ESP32 CheckSilencePrompt).
+func tuneListen() listenTune {
+	t := listenTune{noSpeech: vadNoSpeechTimeout, maxListen: vadMaxListen}
+	sp := SilencePromptDuration()
+	if GateMic() {
+		t.minRMS = GateRMS()
+		t.waitSpeech = true
+		t.muteHead = 400 * time.Millisecond
+		t.maxListen = 3 * time.Minute
+		t.silencePrompt = sp
+		return t
+	}
+	if OpenMic() {
+		// Stay open while quiet (ESP32-style), then end listen + close WSS.
+		// MaxListen is the hard stop even if ambient noise tripped the gate.
+		t.noSpeech = ChannelIdleTimeout
+		t.maxListen = ChannelIdleTimeout
+		if sp > 0 {
+			t.noSpeech = sp
+		}
+		return t
+	}
+	if AmbientActive() {
+		// Wheel noise sits above the standing-still floor (200).
+		t.minRMS = 500
+	}
+	if sp > 0 {
+		t.noSpeech = sp
+		if t.maxListen < ChannelIdleTimeout {
+			t.maxListen = ChannelIdleTimeout
+		}
+	}
+	return t
+}
+
 // captureVAD keeps the mic open until the server returns STT (ESP32 auto mode).
 // An STT consumed here is put back on the client so the shared STT wait sees it.
 func captureVAD(ctx context.Context, client *Client, audioStream <-chan []byte, enc *Encoder, encErr error) (micCapture, error) {
@@ -61,12 +116,20 @@ func captureVAD(ctx context.Context, client *Client, audioStream <-chan []byte, 
 	if encErr == nil && enc != nil {
 		encode = enc.EncodeFrame
 	}
+	tune := tuneListen()
+	if tune.waitSpeech {
+		log.Printf("[Xiaozhi][VAD] holding uplink until RMS %.0f", tune.minRMS)
+	}
 	res, err := listenvad.Capture(ctx, client, audioStream, listenvad.Options{
-		NoSpeech:   vadNoSpeechTimeout,
-		MaxListen:  vadMaxListen,
-		MicWait:    12 * time.Second,
-		FrameBytes: EncFrameSamples * 2,
-		Encode:     encode,
+		NoSpeech:      tune.noSpeech,
+		MaxListen:     tune.maxListen,
+		MicWait:       12 * time.Second,
+		FrameBytes:    EncFrameSamples * 2,
+		MinRMS:        tune.minRMS,
+		WaitForSpeech: tune.waitSpeech,
+		MuteHead:      tune.muteHead,
+		SilencePrompt: tune.silencePrompt,
+		Encode:        encode,
 		OnFirstFrame: func() {
 			MarkMicUplink()
 			log.Println("[Xiaozhi][VAD] first uplink frame")
@@ -75,6 +138,11 @@ func captureVAD(ctx context.Context, client *Client, audioStream <-chan []byte, 
 	out := micCapture{frames: res.Frames, startedAt: res.StartedAt}
 
 	switch {
+	case errors.Is(err, listenvad.ErrSilencePrompt):
+		MarkMicListenEnded()
+		log.Printf("[Xiaozhi][VAD] silence prompt (%s) — %d frames, %v",
+			res.Reason, res.Frames, res.Duration.Round(time.Millisecond))
+		return out, ErrSilencePrompt
 	case err == nil, errors.Is(err, listenvad.ErrNoSpeech):
 		MarkMicListenEnded()
 		if res.StopErr != nil {
@@ -84,6 +152,17 @@ func captureVAD(ctx context.Context, client *Client, audioStream <-chan []byte, 
 			res.Reason, res.Frames, res.Duration.Round(time.Millisecond), res.Speech, res.Floor, res.Peak)
 		if res.STT != "" {
 			client.requeueSTT(res.STT)
+		}
+		// Quiet past silence_prompt_sec (NoSpeech timer) → nudge, not close.
+		if SilencePromptSec() > 0 && res.STT == "" &&
+			(res.Reason == listenvad.ReasonNoSpeech || res.Reason == listenvad.ReasonSilencePrompt) {
+			return out, ErrSilencePrompt
+		}
+		// Open idle: max_listen/no_speech with no STT → ErrNoSpeech so we close
+		// WSS immediately (skip the 30s STT wait).
+		if err == nil && OpenMic() && res.STT == "" &&
+			(res.Reason == listenvad.ReasonMaxListen || res.Reason == listenvad.ReasonNoSpeech) {
+			return out, listenvad.ErrNoSpeech
 		}
 		return out, err
 	case errors.Is(err, listenvad.ErrNoUplink):

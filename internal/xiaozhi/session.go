@@ -30,8 +30,8 @@ type sessionState struct {
 	turnCancel context.CancelFunc
 	// turnGen increments on every BindTurn so an aborted turn cannot Unbind /
 	// CleanupPlaybackFiles belonging to a newer listen/TTS round (barge-in race).
-	turnGen   uint64
-	playing   bool
+	turnGen uint64
+	playing bool
 	// playingSince is set when playing flips true; used to ignore false-wake
 	// barge-in in the first moments of TTS (hotword often queued during the
 	// long wait for the first Opus frame).
@@ -128,6 +128,9 @@ func InvalidateSession(reason string) {
 }
 
 func closeSessionLocked(reason string) {
+	// Any session teardown ends the walking hold, including goodbye and idle.
+	DisarmAmbient()
+	DisarmOpenMic()
 	if sess.idleTimer != nil {
 		sess.idleTimer.Stop()
 		sess.idleTimer = nil
@@ -161,7 +164,9 @@ func resetIdleTimerLocked() {
 		sess.idleTimer.Stop()
 		sess.idleTimer = nil
 	}
-	if !ContinuousMode() || sess.client == nil {
+	ambient := AmbientHold()
+	open := OpenMic()
+	if (!ContinuousMode() && !ambient && !open) || sess.client == nil {
 		return
 	}
 	idle := time.Duration(GetConfig().SessionIdleSec) * time.Second
@@ -170,6 +175,13 @@ func resetIdleTimerLocked() {
 	}
 	if idle < 20*time.Second {
 		idle = 30 * time.Second
+	}
+	// Open mic: ESP32 channel idle (120s). Ambient walking hold keeps a longer
+	// quiet window so cyan backpack does not die mid-wander.
+	if open && idle < ChannelIdleTimeout {
+		idle = ChannelIdleTimeout
+	} else if ambient && idle < AmbientQuiet {
+		idle = AmbientQuiet
 	}
 	// ESP32-style: after idle, tear down WSS. Timer must only run when no
 	// active turn/playback (see MarkActivity / onSessionIdleTimeout).
@@ -720,9 +732,9 @@ var (
 	// Early MCP delivery: when tools/call arrives before the ~9s noaudio deadline,
 	// deliver the robot intent on the SAME listen (instead of noaudio + FakeTrigger).
 	// FakeTrigger ListeningGetIn was racing the Seasonal anim and cutting fireworks.
-	earlyMu            sync.Mutex
-	earlyIntent        string
-	earlyParams        map[string]string
+	earlyMu              sync.Mutex
+	earlyIntent          string
+	earlyParams          map[string]string
 	earlyDeliveredIntent string
 )
 

@@ -243,8 +243,15 @@ procloop:
 
 				chipperOpts := p.defaultChipperOptions()
 				// Same condition vic-anim uses to lift its mic window (Normal streams only).
+				// Open/gate: no stream deadline — anim holds the mic until stopSignal
+				// (speech sent). VADStreamTimeout (34s) was closing quiet open-mic
+				// listens and causing ting→34s→ting loops.
 				if xiaozhi.Enabled() && mode == cloud.StreamType_Normal && xiaozhi.ListenVADActive() {
-					chipperOpts.Timeout = xiaozhi.VADStreamTimeout
+					if xiaozhi.OpenMic() {
+						chipperOpts.Timeout = 0
+					} else {
+						chipperOpts.Timeout = xiaozhi.VADStreamTimeout
+					}
 				}
 				chipperOpts.SaveAudio = p.opts.saveAudio
 				chipperOpts.Language = language

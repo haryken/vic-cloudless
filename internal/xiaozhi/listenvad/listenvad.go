@@ -13,18 +13,20 @@ import (
 
 // End reasons reported in Result.Reason.
 const (
-	ReasonServerSTT = "server_stt"
-	ReasonNoSpeech  = "no_speech"
-	ReasonMaxListen = "max_listen"
-	ReasonMicClosed = "mic_closed"
-	ReasonEndSpeech = "end_of_speech"
+	ReasonServerSTT     = "server_stt"
+	ReasonNoSpeech      = "no_speech"
+	ReasonMaxListen     = "max_listen"
+	ReasonMicClosed     = "mic_closed"
+	ReasonEndSpeech     = "end_of_speech"
+	ReasonSilencePrompt = "silence_prompt"
 )
 
 var (
-	ErrNoSpeech = errors.New("no speech after listen start")
-	ErrNoUplink = errors.New("no mic uplink after listen start")
-	ErrSend     = errors.New("send audio")
-	ErrServer   = errors.New("WSS died during listen")
+	ErrNoSpeech      = errors.New("no speech after listen start")
+	ErrSilencePrompt = errors.New("silence prompt — nudge the user")
+	ErrNoUplink      = errors.New("no mic uplink after listen start")
+	ErrSend          = errors.New("send audio")
+	ErrServer        = errors.New("WSS died during listen")
 )
 
 // Uplink is the subset of the Xiaozhi client used while the mic is open.
@@ -54,6 +56,16 @@ type Options struct {
 	// MuteHead uplinks silence for this long after listen start so the wake
 	// earcon cannot trip a server-side VAD (which would answer it).
 	MuteHead time.Duration
+	// MinRMS raises the "someone started talking" floor. 0 keeps the default.
+	// Ambient (robot walking) sets this above wheel noise.
+	MinRMS float64
+	// WaitForSpeech holds the listen open with no silence timeout until the
+	// gate hears a voice. Audio before that is not uploaded; a short pre-roll
+	// is sent when speech starts.
+	WaitForSpeech bool
+	// SilencePrompt (WaitForSpeech only): if nobody clears the gate by then,
+	// end with ErrSilencePrompt so the caller can nudge the user.
+	SilencePrompt time.Duration
 }
 
 type Result struct {
@@ -78,15 +90,46 @@ type Result struct {
 func Capture(ctx context.Context, up Uplink, audio <-chan []byte, opts Options) (Result, error) {
 	res := Result{StartedAt: time.Now()}
 	gate := NewSpeechGate()
+	if opts.MinRMS > 0 {
+		gate.SetMinRMS(opts.MinRMS)
+	}
 	encBuf := make([]byte, 0, opts.FrameBytes*4)
 	muteBytes := int(opts.MuteHead.Seconds()*gateSampleRate) * 2
 	sentBytes := 0
 
-	noSpeech := time.NewTimer(opts.NoSpeech)
-	defer noSpeech.Stop()
-	maxListen := time.NewTimer(opts.MaxListen)
-	defer maxListen.Stop()
+	// A zero duration leaves that timer off. Open mode uses that so the mic
+	// stays up until the server returns a sentence, instead of the 10s/30s cuts.
+	var noSpeechC <-chan time.Time
+	var maxListenC <-chan time.Time
+	var silencePromptC <-chan time.Time
+	var maxTimer *time.Timer
+	if !opts.WaitForSpeech && opts.NoSpeech > 0 {
+		noSpeech := time.NewTimer(opts.NoSpeech)
+		defer noSpeech.Stop()
+		noSpeechC = noSpeech.C
+	}
+	if !opts.WaitForSpeech && opts.MaxListen > 0 {
+		maxListen := time.NewTimer(opts.MaxListen)
+		defer maxListen.Stop()
+		maxListenC = maxListen.C
+	}
+	if opts.WaitForSpeech && opts.SilencePrompt > 0 {
+		sil := time.NewTimer(opts.SilencePrompt)
+		defer sil.Stop()
+		silencePromptC = sil.C
+	}
+	defer func() {
+		if maxTimer != nil {
+			maxTimer.Stop()
+		}
+	}()
 	micWait := time.After(opts.MicWait)
+	gotMic := false
+	// ~400ms of PCM so the start of the word is not cut off.
+	const preMax = 16000 * 2 * 400 / 1000
+	pre := make([]byte, 0, preMax)
+	flushed := false
+	muteLeft := int(opts.MuteHead.Seconds()*gateSampleRate) * 2
 
 	finish := func() {
 		res.Duration = time.Since(res.StartedAt)
@@ -104,7 +147,38 @@ loop:
 				res.Reason = ReasonMicClosed
 				break loop
 			}
-			gate.Feed(chunk)
+			gotMic = true
+			feed := chunk
+			if muteLeft > 0 {
+				n := len(chunk)
+				if n > muteLeft {
+					n = muteLeft
+				}
+				silenced := append([]byte(nil), chunk...)
+				for i := 0; i < n; i++ {
+					silenced[i] = 0
+				}
+				feed = silenced
+				muteLeft -= n
+			}
+			gate.Feed(feed)
+			// Hold the uplink until a voice is actually there. Wheel noise stays local.
+			if opts.WaitForSpeech && !gate.Started() {
+				pre = append(pre, feed...)
+				if len(pre) > preMax {
+					pre = pre[len(pre)-preMax:]
+				}
+				continue
+			}
+			if opts.WaitForSpeech && maxTimer == nil && opts.MaxListen > 0 {
+				maxTimer = time.NewTimer(opts.MaxListen)
+				maxListenC = maxTimer.C
+			}
+			if opts.WaitForSpeech && !flushed {
+				encBuf = append(encBuf, pre...)
+				pre = nil
+				flushed = true
+			}
 			endSpeech := opts.EndOfSpeech > 0 && gate.SilenceAfterSpeech() >= opts.EndOfSpeech
 			if opts.Encode == nil || opts.FrameBytes <= 0 {
 				if endSpeech {
@@ -113,7 +187,7 @@ loop:
 				}
 				continue
 			}
-			encBuf = append(encBuf, chunk...)
+			encBuf = append(encBuf, feed...)
 			for len(encBuf) >= opts.FrameBytes {
 				frame := encBuf[:opts.FrameBytes]
 				encBuf = encBuf[opts.FrameBytes:]
@@ -142,17 +216,22 @@ loop:
 			res.STT = stt
 			res.Reason = ReasonServerSTT
 			break loop
-		case <-noSpeech.C:
+		case <-noSpeechC:
 			// No uplink yet is MicWait's job (caller relistens on ErrNoUplink).
 			if res.Frames > 0 && !gate.Started() {
 				res.Reason = ReasonNoSpeech
 				break loop
 			}
-		case <-maxListen.C:
+		case <-silencePromptC:
+			if !gate.Started() {
+				res.Reason = ReasonSilencePrompt
+				break loop
+			}
+		case <-maxListenC:
 			res.Reason = ReasonMaxListen
 			break loop
 		case <-micWait:
-			if res.Frames == 0 {
+			if !gotMic && res.Frames == 0 {
 				finish()
 				return res, ErrNoUplink
 			}
@@ -168,8 +247,11 @@ loop:
 
 	finish()
 	res.StopErr = up.ListenStop()
-	if res.Reason == ReasonNoSpeech {
+	switch res.Reason {
+	case ReasonNoSpeech:
 		return res, ErrNoSpeech
+	case ReasonSilencePrompt:
+		return res, ErrSilencePrompt
 	}
 	return res, nil
 }

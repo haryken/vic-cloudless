@@ -363,14 +363,11 @@ func finishDetectTurn(tag string, result *TurnResult) {
 		return
 	}
 	ClearPendingMCPIntent("detect done")
-	if result.EndConversation || !SessionAlive() || !ContinuousMode() || InBlackjackGameMode() {
+	if result.EndConversation || !SessionAlive() || InBlackjackGameMode() ||
+		(!ContinuousMode() && !AmbientHold() && !OpenMic()) {
 		log.Println(tag, "detect reply done — mic closed until Hey Vector")
 		return
 	}
 	time.Sleep(350 * time.Millisecond)
-	if err := TriggerRelisten(); err != nil {
-		log.Println(tag, "relisten after detect:", err)
-		return
-	}
-	log.Println(tag, "relisten after detect reply")
+	ReopenMicAfterChat("after detect reply")
 }

@@ -47,10 +47,20 @@ type SpeechGate struct {
 	// voice is the loudest frame since the first voiced frame.
 	voice   float64
 	talkRun int
+	// minRMS is the absolute floor a frame must clear to count as voice.
+	minRMS float64
 }
 
 func NewSpeechGate() *SpeechGate {
-	return &SpeechGate{}
+	return &SpeechGate{minRMS: gateMinRMS}
+}
+
+// SetMinRMS raises the voice floor. Used while Vector is walking so motor
+// noise is not treated as speech. Values at or below 0 keep the default.
+func (g *SpeechGate) SetMinRMS(v float64) {
+	if v > g.minRMS {
+		g.minRMS = v
+	}
 }
 
 func (g *SpeechGate) Feed(pcm []byte) {
@@ -119,7 +129,11 @@ func (g *SpeechGate) frame(b []byte) {
 	if rms > g.peak {
 		g.peak = rms
 	}
-	if rms > math.Max(g.floor*gateFloorRatio, gateMinRMS) {
+	minRMS := g.minRMS
+	if minRMS <= 0 {
+		minRMS = gateMinRMS
+	}
+	if rms > math.Max(g.floor*gateFloorRatio, minRMS) {
 		g.hot++
 	} else if g.hot > 0 {
 		g.hot--

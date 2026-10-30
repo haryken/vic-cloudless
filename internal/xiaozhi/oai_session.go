@@ -71,6 +71,7 @@ func oaiBeginTurn() {
 }
 
 // oaiArmIdle closes the session after SessionIdleSec without a new turn.
+// Only for persistent conversation styles (continuous / ambient / open / gate).
 func oaiArmIdle(cfg Config) {
 	idle := time.Duration(cfg.SessionIdleSec) * time.Second
 	if idle < 10*time.Second {
@@ -99,6 +100,16 @@ func oaiArmIdle(cfg Config) {
 		oaiCloseSession("idle")
 	})
 	oaiSess.idle = t
+}
+
+// oaiKeepOrCloseAfterTurn mirrors Xiaozhi PersistentSession: keep the Direct-API
+// socket for continuous/ambient/open/gate; close it for single-turn.
+func oaiKeepOrCloseAfterTurn(cfg Config, reason string) {
+	if PersistentSession() {
+		oaiArmIdle(cfg)
+		return
+	}
+	oaiCloseSession(reason)
 }
 
 const oaiBaseInstructions = `Bạn là Vector, chú robot nhỏ thông minh, tinh nghịch và tốt bụng của người dùng.
@@ -199,26 +210,48 @@ const oaiMicFrameBytes = 3840
 const oaiMicMuteHead = 600 * time.Millisecond
 
 // oaiCapture keeps the mic open until end-of-speech (server VAD for Realtime,
-// local silence for the pipeline). Returns listenvad.ErrNoSpeech on silence.
+// local silence for the pipeline). Returns listenvad.ErrNoSpeech on silence,
+// ErrSilencePrompt when quiet past silence_prompt_sec.
 func oaiCapture(ctx context.Context, up listenvad.Uplink, audio <-chan []byte, endOfSpeech time.Duration) (listenvad.Result, error) {
+	tune := tuneListen()
+	mute := oaiMicMuteHead
+	if tune.muteHead > mute {
+		mute = tune.muteHead
+	}
 	res, err := listenvad.Capture(ctx, up, audio, listenvad.Options{
-		NoSpeech:    vadNoSpeechTimeout,
-		MaxListen:   vadMaxListen,
-		MicWait:     12 * time.Second,
-		FrameBytes:  oaiMicFrameBytes,
-		Encode:      func(p []byte) ([]byte, error) { return append([]byte(nil), p...), nil },
-		EndOfSpeech: endOfSpeech,
-		MuteHead:    oaiMicMuteHead,
+		NoSpeech:      tune.noSpeech,
+		MaxListen:     tune.maxListen,
+		MicWait:       12 * time.Second,
+		FrameBytes:    oaiMicFrameBytes,
+		MinRMS:        tune.minRMS,
+		WaitForSpeech: tune.waitSpeech,
+		SilencePrompt: tune.silencePrompt,
+		Encode:        func(p []byte) ([]byte, error) { return append([]byte(nil), p...), nil },
+		EndOfSpeech:   endOfSpeech,
+		MuteHead:      mute,
 		OnFirstFrame: func() {
 			MarkMicUplink()
 			log.Println("[OpenAI][Mic] first uplink frame")
 		},
 	})
 	switch {
+	case errors.Is(err, listenvad.ErrSilencePrompt):
+		MarkMicListenEnded()
+		log.Printf("[OpenAI][Mic] silence prompt (%s) — %d frames, %v",
+			res.Reason, res.Frames, res.Duration.Round(time.Millisecond))
+		return res, ErrSilencePrompt
 	case err == nil, errors.Is(err, listenvad.ErrNoSpeech):
 		MarkMicListenEnded()
 		log.Printf("[OpenAI][Mic] listen end (%s) — %d frames, %v, speech=%v floor=%.0f peak=%.0f talk_thr=%.0f",
 			res.Reason, res.Frames, res.Duration.Round(time.Millisecond), res.Speech, res.Floor, res.Peak, res.TalkThr)
+		if SilencePromptSec() > 0 &&
+			(res.Reason == listenvad.ReasonNoSpeech || res.Reason == listenvad.ReasonSilencePrompt) {
+			return res, ErrSilencePrompt
+		}
+		if err == nil && OpenMic() &&
+			(res.Reason == listenvad.ReasonMaxListen || res.Reason == listenvad.ReasonNoSpeech) {
+			return res, ErrNoSpeech
+		}
 		return res, err
 	case errors.Is(err, listenvad.ErrNoUplink):
 		log.Printf("[OpenAI] no mic audio for %v after listen start", res.Duration.Round(time.Millisecond))
@@ -303,18 +336,22 @@ func runOpenAITurn(audioStream <-chan []byte, cfg Config, afterSTT func(stt stri
 	st.speaker.end()
 	UnbindTurn(turnGen)
 	if turnCtx.Err() == context.Canceled {
-		oaiArmIdle(cfg)
+		oaiKeepOrCloseAfterTurn(cfg, "aborted")
 		return nil, ErrAborted
 	}
 
 	if err != nil && !st.speaker.started {
+		if errors.Is(err, ErrSilencePrompt) {
+			// Caller runs the nudge detect immediately; keep the session.
+			return nil, err
+		}
 		if !errors.Is(err, ErrNoSpeech) {
 			log.Println("[OpenAI] turn error:", err)
 		}
 		if errors.Is(err, errOAISessionBroken) {
 			oaiCloseSession("error")
 		} else {
-			oaiArmIdle(cfg)
+			oaiKeepOrCloseAfterTurn(cfg, "no_speech")
 		}
 		return nil, err
 	}
@@ -331,7 +368,7 @@ func runOpenAITurn(audioStream <-chan []byte, cfg Config, afterSTT func(stt stri
 	if st.end {
 		oaiCloseSession("end_conversation")
 	} else {
-		oaiArmIdle(cfg)
+		oaiKeepOrCloseAfterTurn(cfg, "single")
 	}
 	return st.result(), nil
 }

@@ -52,6 +52,13 @@ type Config struct {
 	FaceGreetEveryMin *int `json:"face_greet_every_min,omitempty"`
 	// TTSGainPct boosts every AI voice before the speaker (100 = as received).
 	TTSGainPct int `json:"tts_gain_pct,omitempty"`
+	// GateRMS is the "gate" mode floor. Audio stays on the robot until a
+	// voice stays above this RMS. 0 means the default (800).
+	GateRMS int `json:"gate_rms,omitempty"`
+	// SilencePromptSec: 0 = off (default). When 10..50, after that many
+	// seconds of quiet while the mic is open, send listen/detect
+	// "khơi gợi lại" so the AI nudges the user to keep talking.
+	SilencePromptSec int `json:"silence_prompt_sec,omitempty"`
 	// Backend: "xiaozhi" (default), "openai", "gemini" (Gemini Live) or
 	// "grok" (xAI Voice); the direct-API ones read openai.json.
 	Backend string `json:"backend,omitempty"`
@@ -106,8 +113,13 @@ func LoadConfig() Config {
 	if cfg.ProtocolVersion == 0 {
 		cfg.ProtocolVersion = 1
 	}
+	// Shared UI default: blank conversation_mode = Liên tục (all AI backends).
+	if cfg.ConversationMode == "" {
+		cfg.ConversationMode = "continuous"
+	}
 	globalCfg = cfg
 	SyncListenVADFlag(cfg)
+	SyncOpenMicModeFlag(cfg)
 	setTTSGain(cfg.TTSGainPct)
 	return cfg
 }
@@ -135,6 +147,7 @@ func SaveConfig(cfg Config) error {
 	globalCfg = cfg
 	globalCfgMu.Unlock()
 	SyncListenVADFlag(cfg)
+	SyncOpenMicModeFlag(cfg)
 	return nil
 }
 
@@ -145,9 +158,90 @@ func Enabled() bool {
 	return globalCfg.Enabled
 }
 
-// ContinuousMode returns true when conversation_mode == "continuous".
+// ContinuousMode returns true when conversation_mode is "continuous", or empty.
+// Empty means continuous: Direct AI (OpenAI / Gemini / Grok / pipeline) and
+// older configs already kept multi-turn chat by default — that maps to Liên tục.
+// Ambient hold is a different mode: it must not FakeTrigger (that freezes Vector).
 func ContinuousMode() bool {
 	globalCfgMu.RLock()
 	defer globalCfgMu.RUnlock()
-	return globalCfg.ConversationMode == "continuous"
+	m := globalCfg.ConversationMode
+	return m == "" || m == "continuous"
+}
+
+// SingleTurnMode is conversation_mode "single": one Q→A then mic off until Hey Vector.
+func SingleTurnMode() bool {
+	globalCfgMu.RLock()
+	defer globalCfgMu.RUnlock()
+	return globalCfg.ConversationMode == "single"
+}
+
+// AmbientHold is conversation_mode "ambient": after the standing listen ends,
+// keep the mic open while Vector walks. It does not include "continuous".
+func AmbientHold() bool {
+	globalCfgMu.RLock()
+	defer globalCfgMu.RUnlock()
+	return globalCfg.ConversationMode == "ambient"
+}
+
+// OpenMic is conversation_mode "open" or "gate": ting and a cyan backpack on
+// wake and on each new turn, without BehaviorReactToVoiceCommand. The mic
+// stays open until the utterance has been sent, then it closes so Vector can
+// speak. "gate" adds a loudness floor; "open" uploads every frame.
+func OpenMic() bool {
+	globalCfgMu.RLock()
+	defer globalCfgMu.RUnlock()
+	m := globalCfg.ConversationMode
+	return m == "open" || m == "gate"
+}
+
+// GateMic is conversation_mode "gate": same wake as open, but nothing is
+// uploaded until the voice clears GateRMS.
+func GateMic() bool {
+	globalCfgMu.RLock()
+	defer globalCfgMu.RUnlock()
+	return globalCfg.ConversationMode == "gate"
+}
+
+const (
+	gateRMSDefault = 800
+	gateRMSMin     = 100
+	gateRMSMax     = 4000
+)
+
+// GateRMS is the configured floor for gate mode, clamped to 100..4000.
+// Unset uses 800, the old open-mic hold.
+func GateRMS() float64 {
+	globalCfgMu.RLock()
+	n := globalCfg.GateRMS
+	globalCfgMu.RUnlock()
+	if n <= 0 {
+		return gateRMSDefault
+	}
+	if n < gateRMSMin {
+		return gateRMSMin
+	}
+	if n > gateRMSMax {
+		return gateRMSMax
+	}
+	return float64(n)
+}
+
+// PersistentSession keeps the AI channel (Xiaozhi WSS or Direct-API socket)
+// up across turns for continuous / ambient / open / gate. Single closes it.
+func PersistentSession() bool {
+	return ContinuousMode() || AmbientHold() || OpenMic()
+}
+
+// SyncOpenMicModeFlag mirrors conversation_mode "open" into /run for vic-anim.
+// The one-shot arm file is removed when leaving the mode so a saved ting
+// cannot fire after the user picks another style.
+func SyncOpenMicModeFlag(cfg Config) {
+	if cfg.Enabled && (cfg.ConversationMode == "open" || cfg.ConversationMode == "gate") {
+		_ = os.MkdirAll(filepath.Dir(OpenMicModeFlagPath), 0775)
+		_ = os.WriteFile(OpenMicModeFlagPath, []byte("1"), 0664)
+		return
+	}
+	_ = os.Remove(OpenMicModeFlagPath)
+	_ = os.Remove(OpenMicArmPath)
 }
