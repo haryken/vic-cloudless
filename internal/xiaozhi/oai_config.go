@@ -19,6 +19,8 @@ const (
 	BackendGemini = "gemini"
 	// BackendGrok is the xAI Grok Voice Agent (OpenAI Realtime compatible).
 	BackendGrok = "grok"
+	// BackendQwen is DashScope Qwen-Audio-Realtime (OpenAI Realtime events).
+	BackendQwen = "qwen"
 
 	OpenAIModeRealtime = "realtime"
 	OpenAIModePipeline = "pipeline"
@@ -63,6 +65,12 @@ type OpenAIConfig struct {
 	XAIAPIKey string `json:"xai_api_key"`
 	GrokModel string `json:"grok_model"`
 	GrokVoice string `json:"grok_voice"`
+	// Qwen Live backend (DashScope / Alibaba Model Studio).
+	DashScopeAPIKey string `json:"dashscope_api_key"`
+	QwenModel       string `json:"qwen_model"`
+	QwenVoice       string `json:"qwen_voice"`
+	// QwenRegion: "intl" (Singapore, default) or "cn" (Beijing).
+	QwenRegion string `json:"qwen_region"`
 	// Shared. Language "auto" lets STT detect the spoken language.
 	Voice        string `json:"voice"`
 	Language     string `json:"language"`
@@ -87,6 +95,9 @@ func defaultOpenAIConfig() OpenAIConfig {
 		GeminiLiveVoice: "Kore",
 		GrokModel:       "grok-voice-latest",
 		GrokVoice:       "eve",
+		QwenModel:       "qwen-audio-3.1-realtime-flash",
+		QwenVoice:       "longanqian_v3.1",
+		QwenRegion:      "intl",
 		Voice:           "coral",
 		Language:        "vi",
 		MemoryTurns:     10,
@@ -125,16 +136,23 @@ func parseOpenAIConfig(data []byte) OpenAIConfig {
 	fill(&cfg.GeminiLiveVoice, d.GeminiLiveVoice)
 	fill(&cfg.GrokModel, d.GrokModel)
 	fill(&cfg.GrokVoice, d.GrokVoice)
+	fill(&cfg.QwenModel, d.QwenModel)
+	fill(&cfg.QwenVoice, d.QwenVoice)
+	fill(&cfg.QwenRegion, d.QwenRegion)
 	fill(&cfg.Voice, d.Voice)
 	fill(&cfg.Language, d.Language)
 	fill(&cfg.VisionModel, d.VisionModel)
 	cfg.Language = strings.ToLower(cfg.Language)
+	if cfg.QwenRegion != "cn" {
+		cfg.QwenRegion = "intl"
+	}
 	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
 	cfg.STTAPIKey = strings.TrimSpace(cfg.STTAPIKey)
 	cfg.LLMAPIKey = strings.TrimSpace(cfg.LLMAPIKey)
 	cfg.GeminiAPIKey = strings.TrimSpace(cfg.GeminiAPIKey)
 	cfg.GroqAPIKey = strings.TrimSpace(cfg.GroqAPIKey)
 	cfg.XAIAPIKey = strings.TrimSpace(cfg.XAIAPIKey)
+	cfg.DashScopeAPIKey = strings.TrimSpace(cfg.DashScopeAPIKey)
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	cfg.STTBaseURL = strings.TrimRight(strings.TrimSpace(cfg.STTBaseURL), "/")
 	cfg.LLMBaseURL = strings.TrimRight(strings.TrimSpace(cfg.LLMBaseURL), "/")
@@ -277,9 +295,9 @@ func (c OpenAIConfig) needsKey() bool {
 }
 
 // IsDirectAPIBackend: the robot talks to the AI API itself (OpenAI, Gemini
-// Live or Grok) instead of the Xiaozhi server — no OTA, always end-of-speech listens.
+// Live, Grok or Qwen) instead of the Xiaozhi server — no OTA, always end-of-speech listens.
 func IsDirectAPIBackend(backend string) bool {
-	return backend == BackendOpenAI || backend == BackendGemini || backend == BackendGrok
+	return backend == BackendOpenAI || backend == BackendGemini || backend == BackendGrok || backend == BackendQwen
 }
 
 // UsingOpenAI reports whether AI giao tiếp is on with a direct-API backend.

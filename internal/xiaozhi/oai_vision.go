@@ -12,23 +12,37 @@ import (
 	"github.com/digital-dream-labs/vector-cloud/internal/log"
 )
 
-// geminiVisionModel / grokVisionModel answer photo questions when vision goes
-// through Gemini or xAI.
+// geminiVisionModel / grokVisionModel / qwenVisionModel answer photo questions
+// when vision goes through Gemini, xAI or DashScope.
 const (
-	geminiVisionModel = "gemini-3.5-flash-lite"
-	grokVisionModel   = "grok-4.7"
-	xaiAPIBase        = "https://api.x.ai/v1"
+	geminiVisionModel   = "gemini-3.5-flash-lite"
+	grokVisionModel     = "grok-4.7"
+	qwenVisionModel     = "qwen3-vl-flash"
+	xaiAPIBase          = "https://api.x.ai/v1"
+	dashscopeAPIIntl    = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+	dashscopeAPICN      = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
+
+func dashscopeCompatibleBase(region string) string {
+	if region == "cn" {
+		return dashscopeAPICN
+	}
+	return dashscopeAPIIntl
+}
 
 // visionEndpoint: OpenAI (local LLMs rarely accept images), Gemini's
 // OpenAI-compatible API for the Gemini Live backend / when only a Gemini key
-// is set, else xAI for the Grok backend with only an xAI key.
+// is set, else xAI for Grok or DashScope for Qwen when that backend's key is
+// the only one available.
 func visionEndpoint(backend string, ocfg OpenAIConfig) (base, key, model string) {
 	if gk := ocfg.geminiKey(); gk != "" && (backend == BackendGemini || ocfg.APIKey == "") {
 		return geminiAPIBase + "/openai", gk, geminiVisionModel
 	}
 	if backend == BackendGrok && ocfg.APIKey == "" && ocfg.XAIAPIKey != "" {
 		return xaiAPIBase, ocfg.XAIAPIKey, grokVisionModel
+	}
+	if backend == BackendQwen && ocfg.APIKey == "" && ocfg.DashScopeAPIKey != "" {
+		return dashscopeCompatibleBase(ocfg.QwenRegion), ocfg.DashScopeAPIKey, qwenVisionModel
 	}
 	return ocfg.BaseURL, ocfg.APIKey, ocfg.VisionModel
 }

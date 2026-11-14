@@ -80,7 +80,8 @@ func TestVisionEndpoint(t *testing.T) {
 }
 
 func TestIsDirectAPIBackend(t *testing.T) {
-	if !IsDirectAPIBackend(BackendOpenAI) || !IsDirectAPIBackend(BackendGemini) || IsDirectAPIBackend("") || IsDirectAPIBackend(BackendXiaozhi) {
+	if !IsDirectAPIBackend(BackendOpenAI) || !IsDirectAPIBackend(BackendGemini) || !IsDirectAPIBackend(BackendQwen) ||
+		IsDirectAPIBackend("") || IsDirectAPIBackend(BackendXiaozhi) {
 		t.Fatal("direct backend classification")
 	}
 	if !VADListenMode(Config{Backend: BackendGemini}) {

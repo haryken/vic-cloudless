@@ -299,12 +299,15 @@ func runOpenAITurn(audioStream <-chan []byte, cfg Config, afterSTT func(stt stri
 	ocfg := LoadOpenAIConfig()
 	gemini := cfg.Backend == BackendGemini
 	grok := cfg.Backend == BackendGrok
+	qwen := cfg.Backend == BackendQwen
 	switch {
 	case gemini && ocfg.geminiKey() == "":
 		return nil, fmt.Errorf("gemini: API key not set")
 	case grok && ocfg.XAIAPIKey == "":
 		return nil, fmt.Errorf("grok: xAI API key not set")
-	case !gemini && !grok && ocfg.needsKey():
+	case qwen && ocfg.DashScopeAPIKey == "":
+		return nil, fmt.Errorf("qwen: DashScope API key not set")
+	case !gemini && !grok && !qwen && ocfg.needsKey():
 		return nil, fmt.Errorf("openai: API key not set")
 	}
 
@@ -323,7 +326,7 @@ func runOpenAITurn(audioStream <-chan []byte, cfg Config, afterSTT func(stt stri
 	switch {
 	case gemini:
 		err = runGeminiLiveTurn(turnCtx, audioStream, cfg, ocfg, afterSTT, detectText, st)
-	case grok:
+	case grok, qwen:
 		err = runRealtimeTurn(turnCtx, audioStream, cfg, ocfg, afterSTT, detectText, st)
 	case ocfg.Mode == OpenAIModePipeline:
 		err = runPipelineTurn(turnCtx, audioStream, cfg, ocfg, afterSTT, detectText, st)

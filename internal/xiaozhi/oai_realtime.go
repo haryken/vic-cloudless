@@ -21,8 +21,9 @@ import (
 
 // Mode A: OpenAI Realtime API over one WebSocket. Server VAD ends the user's
 // turn, the model answers with audio and calls self.* tools as functions.
-// Models named "*preview*" speak the beta protocol. The Grok backend (xAI
-// Voice Agent) speaks the same events with its own session.update shape.
+// Models named "*preview*" speak the beta protocol. Grok (xAI) and Qwen
+// (DashScope Audio-Realtime) speak the same events with their own
+// session.update shapes; Qwen wants 16 kHz mic PCM instead of 24 kHz.
 
 const (
 	rtSampleRate     = 24000
@@ -41,6 +42,9 @@ type rtConn struct {
 	beta   bool
 	tag    string
 	sig    string
+	// inRate is the PCM sample rate expected by input_audio_buffer.append
+	// (24000 for OpenAI/Grok, 16000 for Qwen).
+	inRate int
 	wmu    sync.Mutex
 	events chan rtEvent
 	// stopped carries server end-of-speech to listenvad.Capture.
@@ -134,9 +138,17 @@ func rtIsBeta(model string) bool {
 
 var grokRealtimeURL = "wss://api.x.ai/v1/realtime"
 
-// rtTarget is the realtime server: OpenAI (mode A) or xAI Grok.
+var (
+	qwenRealtimeURLIntl = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+	qwenRealtimeURLCN   = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+)
+
+const qwenInputRate = 16000
+
+// rtTarget is the realtime server: OpenAI (mode A), xAI Grok, or DashScope Qwen.
 type rtTarget struct {
 	grok  bool
+	qwen  bool
 	url   string
 	key   string
 	model string
@@ -144,10 +156,21 @@ type rtTarget struct {
 	tag   string
 }
 
+func qwenRealtimeBase(region string) string {
+	if region == "cn" {
+		return qwenRealtimeURLCN
+	}
+	return qwenRealtimeURLIntl
+}
+
 func rtTargetFor(backend string, ocfg OpenAIConfig) rtTarget {
 	if backend == BackendGrok {
 		return rtTarget{grok: true, url: grokRealtimeURL + "?model=" + url.QueryEscape(ocfg.GrokModel),
 			key: ocfg.XAIAPIKey, model: ocfg.GrokModel, voice: ocfg.GrokVoice, tag: "[Grok]"}
+	}
+	if backend == BackendQwen {
+		return rtTarget{qwen: true, url: qwenRealtimeBase(ocfg.QwenRegion) + "?model=" + url.QueryEscape(ocfg.QwenModel),
+			key: ocfg.DashScopeAPIKey, model: ocfg.QwenModel, voice: ocfg.QwenVoice, tag: "[Qwen]"}
 	}
 	return rtTarget{url: rtURL(ocfg), key: ocfg.APIKey, model: ocfg.RealtimeModel, voice: ocfg.Voice, tag: "[OpenAI][RT]"}
 }
@@ -196,6 +219,30 @@ func grokSessionUpdate(cfg Config, ocfg OpenAIConfig, t rtTarget, instructions s
 			"tools": tools,
 		},
 	}
+}
+
+// qwenSessionUpdate follows DashScope Qwen-Audio-Realtime: 16 kHz pcm in,
+// 24 kHz pcm out, nested Chat-Completions tool shape. Tools and enable_search
+// must not both be on; robot tools win.
+func qwenSessionUpdate(cfg Config, ocfg OpenAIConfig, t rtTarget, instructions string) map[string]interface{} {
+	sess := map[string]interface{}{
+		"modalities":          []string{"text", "audio"},
+		"instructions":        instructions,
+		"voice":               t.voice,
+		"input_audio_format":  "pcm",
+		"output_audio_format": "pcm",
+		"turn_detection": map[string]interface{}{
+			"type":                "server_vad",
+			"threshold":           0.5,
+			"silence_duration_ms": 800,
+		},
+		"tools":       oaiChatTools(cfg),
+		"tool_choice": "auto",
+	}
+	if lang := ocfg.sttLanguage(); lang != "" {
+		sess["input_audio_transcription"] = map[string]interface{}{"language": lang}
+	}
+	return map[string]interface{}{"type": "session.update", "session": sess}
 }
 
 func rtSessionUpdate(cfg Config, ocfg OpenAIConfig, beta bool, instructions string) map[string]interface{} {
@@ -287,11 +334,15 @@ func dialRealtime(ctx context.Context, cfg Config, ocfg OpenAIConfig, t rtTarget
 var errRTSessionRejected = errors.New("session.update rejected")
 
 func dialRealtimeOnce(ctx context.Context, cfg Config, ocfg OpenAIConfig, t rtTarget, search bool) (*rtConn, error) {
-	beta := !t.grok && rtIsBeta(t.model)
+	beta := !t.grok && !t.qwen && rtIsBeta(t.model)
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+t.key)
 	if beta {
 		h.Set("OpenAI-Beta", "realtime=v1")
+	}
+	if t.qwen {
+		// Some Qwen Audio Realtime models require this on the handshake.
+		h.Set("X-DashScope-DataInspection", "enable")
 	}
 	d := websocket.Dialer{HandshakeTimeout: 10 * time.Second, Proxy: http.ProxyFromEnvironment}
 	dctx, cancel := context.WithTimeout(ctx, 12*time.Second)
@@ -307,11 +358,16 @@ func dialRealtimeOnce(ctx context.Context, cfg Config, ocfg OpenAIConfig, t rtTa
 		return nil, fmt.Errorf("realtime dial: %w", err)
 	}
 	ws.SetReadLimit(8 << 20)
+	inRate := rtSampleRate
+	if t.qwen {
+		inRate = qwenInputRate
+	}
 	c := &rtConn{
 		ws:      ws,
 		beta:    beta,
 		tag:     t.tag,
 		sig:     rtSignature(cfg, ocfg, t),
+		inRate:  inRate,
 		events:  make(chan rtEvent, 4096),
 		stopped: make(chan string, 1),
 		errCh:   make(chan error, 1),
@@ -322,8 +378,11 @@ func dialRealtimeOnce(ctx context.Context, cfg Config, ocfg OpenAIConfig, t rtTa
 	mem := oaiMemoryTail(loadOAIMemory(), ocfg.MemoryTurns)
 	instructions := oaiInstructions(ocfg, mem)
 	update := rtSessionUpdate(cfg, ocfg, beta, instructions)
-	if t.grok {
+	switch {
+	case t.grok:
 		update = grokSessionUpdate(cfg, ocfg, t, instructions, search)
+	case t.qwen:
+		update = qwenSessionUpdate(cfg, ocfg, t, instructions)
 	}
 	if err := c.send(update); err != nil {
 		c.close()
@@ -398,10 +457,13 @@ func rtErrorOf(raw []byte) (msg, code string) {
 type rtUplink struct{ c *rtConn }
 
 func (u rtUplink) SendAudio(pcm16k []byte) error {
-	pcm24 := resampleS16(pcm16k, 16000, rtSampleRate)
+	pcm := pcm16k
+	if u.c.inRate == rtSampleRate {
+		pcm = resampleS16(pcm16k, 16000, rtSampleRate)
+	}
 	return u.c.send(map[string]interface{}{
 		"type":  "input_audio_buffer.append",
-		"audio": base64.StdEncoding.EncodeToString(pcm24),
+		"audio": base64.StdEncoding.EncodeToString(pcm),
 	})
 }
 func (u rtUplink) ListenStop() error    { return nil }
@@ -413,10 +475,14 @@ func runRealtimeTurn(ctx context.Context, audio <-chan []byte, cfg Config, ocfg 
 	t := rtTargetFor(cfg.Backend, ocfg)
 	c, err := rtEnsure(ctx, cfg, ocfg, t)
 	if err != nil {
-		if t.grok {
+		switch {
+		case t.grok:
 			return fmt.Errorf("grok %w", err)
+		case t.qwen:
+			return fmt.Errorf("qwen %w", err)
+		default:
+			return fmt.Errorf("openai %w", err)
 		}
-		return fmt.Errorf("openai %w", err)
 	}
 	c.drain()
 
