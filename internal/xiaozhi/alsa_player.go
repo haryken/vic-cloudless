@@ -42,9 +42,9 @@ const (
 	alsaPeriodCount = "40"
 	alsaMixerMM2    = "PRI_MI2S_RX Audio Mixer MultiMedia2"
 	alsaQueueCap    = 512
-	// Silence drip only once the 512ms ring is about to run dry. Sentence
-	// gaps are often ~400ms and still fit in that ring; dripping at 400ms
-	// inserted a hitch (the "vấp") before the next chunk arrived.
+	// Silence drip only after typical Xiaozhi sentence gaps (~450–500ms).
+	// Pad at 400–460ms fired while the next Opus was still in flight → "vấp".
+	// period_count stays 8 (512ms ring); 16 fails pcm_open on Vector MM2.
 	alsaKeepaliveEvery = 8 * time.Millisecond
 	alsaKeepaliveBytes = 256 // 128 frames * 2 bytes = 8ms @ 16kHz mono
 )
@@ -184,13 +184,12 @@ func alsaStart() error {
 	alsaRealBytes = 0
 	alsaPendingBytes = 0
 	alsaReady.Store(true)
-	// Pad only once the 512ms ring is nearly empty. A ~400ms server pause
-	// still has audio queued; dripping there was the audible hitch.
+	// Do not pad during ~0.5s server gaps (that hitch is the "vấp").
 	alsaKeepalive.Store(true)
 
 	go alsaPump(w, pcmCh, done, cmd)
 
-	log.Printf("[Xiaozhi][ALSA] player started (%s, period 1024 x8, silence after 460ms)", player)
+	log.Printf("[Xiaozhi][ALSA] player started (%s, period 1024 x8, silence after 900ms)", player)
 	return nil
 }
 
@@ -221,11 +220,10 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 
 	var lastRealPCM time.Time
 	var gapLogged bool
-	// Start just before the 512ms ring runs dry. Shorter idle is still
-	// covered by audio already queued, so it must not be overwritten
-	// with silence.
+	// Measured vấp: gap silence @~466ms then next sentence. Keep pad above
+	// those Xiaozhi inter-sentence holes; ring is still 512ms (×8).
 	const (
-		minGapBeforePad = 460 * time.Millisecond
+		minGapBeforePad = 900 * time.Millisecond
 		maxGapPad       = 60 * time.Second
 	)
 
@@ -284,7 +282,7 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 				continue
 			}
 			if !gapLogged {
-				log.Printf("[Xiaozhi][ALSA] gap silence after %v idle — holding the 512ms ring",
+				log.Printf("[Xiaozhi][ALSA] gap silence after %v idle — holding ring (pad≥900ms)",
 					idle.Round(time.Millisecond))
 				gapLogged = true
 			}

@@ -50,7 +50,9 @@ type Config struct {
 	// FaceGreetEveryMin: minimum minutes between face greetings; unset = 5,
 	// 0 = no wait (greet whenever someone arrives and no chat is running).
 	FaceGreetEveryMin *int `json:"face_greet_every_min,omitempty"`
-	// TTSGainPct boosts every AI voice before the speaker (100 = as received).
+	// TTSGainPct scales every AI voice before the speaker.
+	// 100 = ALSA full (as received); <100 quieter (≈ old Wwise LOW near 25–40);
+	// >100 boosts the voice band.
 	TTSGainPct int `json:"tts_gain_pct,omitempty"`
 	// GateRMS is the "gate" mode floor. Audio stays on the robot until a
 	// voice stays above this RMS. 0 means the default (800).

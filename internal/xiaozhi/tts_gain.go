@@ -8,11 +8,14 @@ import (
 )
 
 const (
-	ttsGainMinPct = 100
+	// 25% ≈ Plan-B quiet similar to old ExternalAudio at VOLUME_LOW
+	// (ALSA bypasses Wwise master_volume). 100% = current full ALSA loudness.
+	ttsGainMinPct = 25
 	ttsGainMaxPct = 1000
+	ttsGainDefaultPct = 100
 )
 
-// ttsGainPct is the user's AI voice boost (tts_gain_pct), refreshed on every
+// ttsGainPct is the user's AI voice level (tts_gain_pct), refreshed on every
 // LoadConfig so a change applies from the next turn.
 var ttsGainPct atomic.Int32
 
@@ -23,7 +26,7 @@ func setTTSGain(pct int) {
 func clampTTSGain(pct int) int {
 	switch {
 	case pct <= 0:
-		return ttsGainMinPct
+		return ttsGainDefaultPct
 	case pct < ttsGainMinPct:
 		return ttsGainMinPct
 	case pct > ttsGainMaxPct:
@@ -77,13 +80,18 @@ var ttsLimiter struct {
 	hist   []float64
 }
 
-// applyTTSGain leaves 100% untouched (the source as-is). Above that it boosts
-// the speaker's voice band linearly and limits only the peaks that would
-// clip, so loud boosts stay clean (no waveshaping distortion).
+// applyTTSGain:
+//   - 100%: source as-is (= current ALSA loudness, peak ~−1 dBFS)
+//   - <100%: linear attenuate (25–40% ≈ old Wwise VOLUME_LOW feel)
+//   - >100%: boost voice band + look-ahead limiter (unchanged)
 func applyTTSGain(pcm []byte) []byte {
 	pct := ttsGainPct.Load()
-	if pct <= ttsGainMinPct || len(pcm) < 2 {
+	if len(pcm) < 2 || pct == ttsGainDefaultPct {
 		return pcm
+	}
+	if pct < ttsGainDefaultPct {
+		out, _ := limitGain(pcm, float64(pct)/100, 1)
+		return out
 	}
 	ttsLimiter.mu.Lock()
 	defer ttsLimiter.mu.Unlock()

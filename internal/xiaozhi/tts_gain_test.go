@@ -134,11 +134,26 @@ func TestApplyTTSGainFullPercentIsSource(t *testing.T) {
 }
 
 func TestClampTTSGain(t *testing.T) {
-	cases := map[int]int{0: 100, -5: 100, 50: 100, 100: 100, 160: 160, 300: 300, 400: 400, 1000: 1000, 1500: 1000}
+	cases := map[int]int{0: 100, -5: 100, 20: 25, 30: 30, 50: 50, 100: 100, 160: 160, 300: 300, 400: 400, 1000: 1000, 1500: 1000}
 	for in, want := range cases {
 		if got := clampTTSGain(in); got != want {
 			t.Fatalf("clampTTSGain(%d) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+func TestApplyTTSGainAttenuates(t *testing.T) {
+	defer setTTSGain(0)
+	setTTSGain(30)
+	in := tonePCM(16000, 320, 150, 10000)
+	out := applyTTSGain(in)
+	peak := 0.0
+	for i := 0; i < 320; i++ {
+		peak = math.Max(peak, math.Abs(pcmSample(out, i)))
+	}
+	// 30% of 10000 → ~3000
+	if peak < 2800 || peak > 3200 {
+		t.Fatalf("30%% attenuate on 10000 peak gave %v", peak)
 	}
 }
 
