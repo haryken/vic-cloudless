@@ -146,7 +146,7 @@ func relistenAfterChess() {
 	if InBlackjackGameMode() || !SessionAlive() {
 		return
 	}
-	if !ContinuousMode() && !AmbientHold() && !OpenMic() {
+	if !ContinuousMode() && !StandHoldMode() && !AmbientHold() && !OpenMic() {
 		return
 	}
 	DisarmRelistenPending()

@@ -166,7 +166,8 @@ func resetIdleTimerLocked() {
 	}
 	ambient := AmbientHold()
 	open := OpenMic()
-	if (!ContinuousMode() && !ambient && !open) || sess.client == nil {
+	stand := StandHoldMode()
+	if (!ContinuousMode() && !ambient && !open && !stand) || sess.client == nil {
 		return
 	}
 	idle := time.Duration(GetConfig().SessionIdleSec) * time.Second
@@ -176,9 +177,11 @@ func resetIdleTimerLocked() {
 	if idle < 20*time.Second {
 		idle = 30 * time.Second
 	}
-	// Open mic: ESP32 channel idle (120s). Ambient walking hold keeps a longer
-	// quiet window so cyan backpack does not die mid-wander.
-	if open && idle < ChannelIdleTimeout {
+	// Open / stand: ESP32 channel idle (120s). Ambient walking hold keeps a
+	// longer quiet window so cyan backpack does not die mid-wander.
+	if stand {
+		idle = StandHoldIdle()
+	} else if open && idle < ChannelIdleTimeout {
 		idle = ChannelIdleTimeout
 	} else if ambient && idle < AmbientQuiet {
 		idle = AmbientQuiet

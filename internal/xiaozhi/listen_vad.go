@@ -71,7 +71,8 @@ type listenTune struct {
 }
 
 // tuneListen matches continuous unless the mode says otherwise.
-// Open uploads every frame and does not close on the 10s/30s cuts.
+// Open keeps the mic always open (ESP32-style ChannelIdleTimeout); only the
+// wake effect differs from continuous (ting + walk, no standing FakeTrigger).
 // Gate keeps that wake, but holds audio on the robot until GateRMS.
 // When silence_prompt_sec is on, NoSpeech fires the nudge before MaxListen
 // closes the channel (ESP32 CheckSilencePrompt).
@@ -87,12 +88,25 @@ func tuneListen() listenTune {
 		return t
 	}
 	if OpenMic() {
-		// Stay open while quiet (ESP32-style), then end listen + close WSS.
-		// MaxListen is the hard stop even if ambient noise tripped the gate.
+		// Always-open uplink until server STT or long idle. Ting finishes before
+		// CreateStreamJob, so no muteHead (continuous has none) — muting 400ms
+		// after open ate the first syllables and made STT feel less sensitive.
 		t.noSpeech = ChannelIdleTimeout
 		t.maxListen = ChannelIdleTimeout
 		if sp > 0 {
 			t.noSpeech = sp
+		}
+		return t
+	}
+	if StandHoldMode() {
+		// Own tune: standing FakeTrigger like continuous, but noSpeech/maxListen
+		// follow WSS idle — not the hard 10s continuous cut.
+		idle := StandHoldIdle()
+		t.noSpeech = idle
+		t.maxListen = idle
+		if sp > 0 {
+			t.noSpeech = sp
+			t.silencePrompt = sp
 		}
 		return t
 	}
@@ -158,9 +172,10 @@ func captureVAD(ctx context.Context, client *Client, audioStream <-chan []byte, 
 			(res.Reason == listenvad.ReasonNoSpeech || res.Reason == listenvad.ReasonSilencePrompt) {
 			return out, ErrSilencePrompt
 		}
-		// Open idle: max_listen/no_speech with no STT → ErrNoSpeech so we close
-		// WSS immediately (skip the 30s STT wait).
-		if err == nil && OpenMic() && res.STT == "" &&
+		// Open / stand idle: max_listen/no_speech with no STT → ErrNoSpeech so
+		// we close WSS immediately (skip the 30s STT wait).
+		if err == nil && res.STT == "" &&
+			(OpenMic() || StandHoldMode()) &&
 			(res.Reason == listenvad.ReasonMaxListen || res.Reason == listenvad.ReasonNoSpeech) {
 			return out, listenvad.ErrNoSpeech
 		}

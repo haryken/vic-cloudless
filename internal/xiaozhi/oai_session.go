@@ -248,7 +248,7 @@ func oaiCapture(ctx context.Context, up listenvad.Uplink, audio <-chan []byte, e
 			(res.Reason == listenvad.ReasonNoSpeech || res.Reason == listenvad.ReasonSilencePrompt) {
 			return res, ErrSilencePrompt
 		}
-		if err == nil && OpenMic() &&
+		if err == nil && (OpenMic() || StandHoldMode()) &&
 			(res.Reason == listenvad.ReasonMaxListen || res.Reason == listenvad.ReasonNoSpeech) {
 			return res, ErrNoSpeech
 		}

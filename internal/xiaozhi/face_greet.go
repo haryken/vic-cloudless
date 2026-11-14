@@ -1,6 +1,7 @@
 package xiaozhi
 
 import (
+	"os"
 	"sync"
 	"time"
 
@@ -34,6 +35,13 @@ func noteConversation() {
 	face.mu.Unlock()
 }
 
+// NoteConversation is the exported wake/listen marker. Call as soon as Hey
+// Vector (or open-mic arm) starts — before BindTurn / WSS — so face greet
+// cannot race into the quiet window.
+func NoteConversation() {
+	noteConversation()
+}
+
 // OnFaceObserved is called for every RobotObservedFace from vic-engine.
 // It must not block (runs on the engine message loop).
 func OnFaceObserved(faceID int32) {
@@ -46,21 +54,42 @@ func OnFaceObserved(faceID int32) {
 // greeting (claims the in-progress slot when it does).
 func faceArrivalDue(now time.Time) bool {
 	face.mu.Lock()
-	defer face.mu.Unlock()
 	arrived := face.lastSeen.IsZero() || now.Sub(face.lastSeen) >= faceAbsentGap
 	face.lastSeen = now
-	switch {
-	case !arrived, face.greeting:
+	skip := !arrived || face.greeting ||
+		(!face.lastTalk.IsZero() && now.Sub(face.lastTalk) < faceQuietAfter)
+	face.mu.Unlock()
+	if skip {
 		return false
-	case !face.lastTalk.IsZero() && now.Sub(face.lastTalk) < faceQuietAfter:
+	}
+	// IsBusy/SessionAlive/openMic take other locks — check outside face.mu.
+	if faceGreetBusyNow() != "" {
 		return false
-	case MusicPlaying():
-		// Music-only mode has no WSS, so it is not "conversation open", but
-		// the song is the current activity. Do not claim a greeting.
+	}
+	face.mu.Lock()
+	defer face.mu.Unlock()
+	if face.greeting || (!face.lastTalk.IsZero() && now.Sub(face.lastTalk) < faceQuietAfter) {
 		return false
 	}
 	face.greeting = true
 	return true
+}
+
+// faceGreetBusyNow is the non-quiet half of faceGreetBlocked (no face.mu).
+func faceGreetBusyNow() string {
+	switch {
+	case IsBusy():
+		return "turn/playback active"
+	case SessionAlive():
+		return "conversation open"
+	case openMicArmed():
+		return "open mic armed"
+	case MusicPlaying():
+		return "music playing"
+	case InBlackjackGameMode():
+		return "blackjack"
+	}
+	return ""
 }
 
 func greetFace(faceID int32) {
@@ -113,15 +142,25 @@ func faceGreetCooldownLeft(now time.Time, every time.Duration) time.Duration {
 }
 
 func faceGreetBlocked() string {
-	switch {
-	case IsBusy():
-		return "turn/playback active"
-	case SessionAlive():
-		return "conversation open"
-	case MusicPlaying():
-		return "music playing"
-	case InBlackjackGameMode():
-		return "blackjack"
+	if reason := faceGreetBusyNow(); reason != "" {
+		return reason
+	}
+	// Covers the wake→BindTurn gap: Hotword already noted activity but
+	// IsBusy/SessionAlive are still false. Also catches a face claim that
+	// raced ahead of NoteConversation before greetFace runs.
+	if conversationQuietActive(time.Now()) {
+		return "recent conversation"
 	}
 	return ""
+}
+
+func openMicArmed() bool {
+	_, err := os.Stat(OpenMicArmPath)
+	return err == nil
+}
+
+func conversationQuietActive(now time.Time) bool {
+	face.mu.Lock()
+	defer face.mu.Unlock()
+	return !face.lastTalk.IsZero() && now.Sub(face.lastTalk) < faceQuietAfter
 }

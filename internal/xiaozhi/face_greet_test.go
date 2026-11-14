@@ -122,3 +122,23 @@ func TestFaceSkipsRightAfterConversation(t *testing.T) {
 		t.Fatal("should greet once the quiet window passed and the person re-arrives")
 	}
 }
+
+func TestFaceGreetBlockedAfterWakeNote(t *testing.T) {
+	resetFaceState()
+	if got := faceGreetBlocked(); got != "" {
+		t.Fatalf("idle must allow greet, got %q", got)
+	}
+	NoteConversation()
+	if got := faceGreetBlocked(); got != "recent conversation" {
+		t.Fatalf("wake note must block face greet, got %q", got)
+	}
+	// Claim raced ahead of NoteConversation: greetFace still refuses.
+	resetFaceState()
+	if !faceArrivalDue(time.Now()) {
+		t.Fatal("first sighting should claim")
+	}
+	NoteConversation()
+	if got := faceGreetBlocked(); got != "recent conversation" {
+		t.Fatalf("post-claim wake must still block greetFace, got %q", got)
+	}
+}

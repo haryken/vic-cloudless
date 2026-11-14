@@ -309,6 +309,9 @@ func StreamAppendSuspended() bool {
 // Plan B (ALSA): writes directly to tinyplay FIFO — ALSA provides backpressure.
 func StreamAppend(pcm []byte) (fileSize int64, err error) {
 	pcm = applyTTSGain(pcm)
+	if p := curTTSProbe.Load(); p != nil {
+		p.noteGain(pcm)
+	}
 	if UseAlsaPlayback() {
 		if len(pcm) == 0 {
 			return alsaBytesWritten(), nil
@@ -557,6 +560,8 @@ func ArmOpenMic() error {
 	if err := os.WriteFile(OpenMicArmPath, []byte("1"), 0644); err != nil {
 		return err
 	}
+	// Face greet must not slip in between arm and the coming Hotword/BindTurn.
+	noteConversation()
 	MarkActivity()
 	return nil
 }
@@ -568,7 +573,8 @@ func DisarmOpenMic() {
 }
 
 // ReopenMicAfterChat continues a conversation. Continuous mode FakeTriggers
-// (Vector stands still). Ambient mode only arms the walking hold. Open mode
+// (Vector stands still). Stand mode uses its own FakeTrigger helper (same
+// earcon/stand FX, longer listen). Ambient arms the walking hold. Open mode
 // plays the ting and opens the mic without the standing listen.
 func ReopenMicAfterChat(reason string) {
 	if InBlackjackGameMode() {
@@ -580,6 +586,10 @@ func ReopenMicAfterChat(reason string) {
 		} else {
 			log.Println("[Xiaozhi][Mic] open mic —", reason)
 		}
+		return
+	}
+	if StandHoldMode() {
+		StandHoldRelisten(reason)
 		return
 	}
 	if AmbientHold() {

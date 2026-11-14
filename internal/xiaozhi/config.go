@@ -230,9 +230,9 @@ func GateRMS() float64 {
 }
 
 // PersistentSession keeps the AI channel (Xiaozhi WSS or Direct-API socket)
-// up across turns for continuous / ambient / open / gate. Single closes it.
+// up across turns for continuous / stand / ambient / open / gate. Single closes it.
 func PersistentSession() bool {
-	return ContinuousMode() || AmbientHold() || OpenMic()
+	return ContinuousMode() || StandHoldMode() || AmbientHold() || OpenMic()
 }
 
 // SyncOpenMicModeFlag mirrors conversation_mode "open" into /run for vic-anim.

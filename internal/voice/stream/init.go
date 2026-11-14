@@ -232,9 +232,13 @@ func (strm *Streamer) runXiaozhiTurn() {
 			if xiaozhi.AmbientHold() {
 				xiaozhi.ReopenMicAfterChat("nobody spoke")
 			} else if xiaozhi.OpenMic() {
-				// ESP32: quiet past ChannelIdleTimeout → drop WSS + mic (no ting loop).
+				// Long idle while always-open → drop WSS (ESP32 channel idle).
 				xiaozhi.CloseSession()
 				log.Println("[Xiaozhi][Mic] open idle — closed WSS until Hey Vector / button")
+			} else if xiaozhi.StandHoldMode() {
+				// Quiet through stand idle → same as WSS gone; close channel.
+				xiaozhi.CloseSession()
+				log.Println("[Xiaozhi][Stand] idle — closed WSS until Hey Vector / button")
 			} else {
 				log.Println("[Xiaozhi][VAD] nobody spoke — mic closed until Hey Vector / button")
 			}
@@ -260,7 +264,7 @@ func (strm *Streamer) runXiaozhiTurn() {
 		errText := err.Error()
 		if !xiaozhi.InBlackjackGameMode() && strings.Contains(errText, "no mic uplink") {
 			time.Sleep(800 * time.Millisecond)
-			if xiaozhi.AmbientHold() || xiaozhi.OpenMic() {
+			if xiaozhi.AmbientHold() || xiaozhi.OpenMic() || xiaozhi.StandHoldMode() {
 				xiaozhi.ReopenMicAfterChat("mic uplink miss")
 			} else if xiaozhi.ContinuousMode() {
 				if rerr := xiaozhi.TriggerRelisten(); rerr != nil {
@@ -287,6 +291,9 @@ func (strm *Streamer) runXiaozhiTurn() {
 			} else if xiaozhi.OpenMic() {
 				xiaozhi.CloseSession()
 				log.Println("[Xiaozhi][Mic] open idle (STT silence) — closed WSS until Hey Vector / button")
+			} else if xiaozhi.StandHoldMode() {
+				xiaozhi.CloseSession()
+				log.Println("[Xiaozhi][Stand] idle (STT silence) — closed WSS until Hey Vector / button")
 			} else {
 				log.Println("[Xiaozhi] silence after listen — mic closed until Hey Vector / button")
 			}
@@ -410,7 +417,7 @@ func (strm *Streamer) runXiaozhiTurn() {
 			log.Println("[Xiaozhi][TTS] turn done; session:", xiaozhi.ActiveSessionID())
 			return
 		}
-		if (xiaozhi.ContinuousMode() || xiaozhi.AmbientHold() || xiaozhi.OpenMic()) && !xiaozhi.InBlackjackGameMode() {
+		if (xiaozhi.ContinuousMode() || xiaozhi.StandHoldMode() || xiaozhi.AmbientHold() || xiaozhi.OpenMic()) && !xiaozhi.InBlackjackGameMode() {
 			if cool := xiaozhi.AnalyzeCooldownRemaining(); cool > 0 {
 				log.Printf("[Xiaozhi] post-analyze cooldown %v before relisten (RAM recover)", cool.Round(time.Millisecond))
 				xiaozhi.CleanupPlaybackFiles()
@@ -469,7 +476,7 @@ func (strm *Streamer) runXiaozhiTurn() {
 					xiaozhi.DisarmRelistenPending()
 					xiaozhi.DisarmAmbient()
 					log.Println("[Xiaozhi] WSS closed after one-shot — no relisten")
-				} else if (xiaozhi.ContinuousMode() || xiaozhi.AmbientHold() || xiaozhi.OpenMic()) && !xiaozhi.InBlackjackGameMode() {
+				} else if (xiaozhi.ContinuousMode() || xiaozhi.StandHoldMode() || xiaozhi.AmbientHold() || xiaozhi.OpenMic()) && !xiaozhi.InBlackjackGameMode() {
 					xiaozhi.ReopenMicAfterChat("after one-shot")
 				}
 			}
@@ -492,7 +499,7 @@ func (strm *Streamer) runXiaozhiTurn() {
 		})
 	})
 
-	if (xiaozhi.ContinuousMode() || xiaozhi.AmbientHold() || xiaozhi.OpenMic()) && !xiaozhi.InBlackjackGameMode() &&
+	if (xiaozhi.ContinuousMode() || xiaozhi.StandHoldMode() || xiaozhi.AmbientHold() || xiaozhi.OpenMic()) && !xiaozhi.InBlackjackGameMode() &&
 		!result.EndConversation && xiaozhi.SessionAlive() {
 		go func() {
 			// Rough wait for Acapela to finish speaking before relisten.

@@ -364,7 +364,7 @@ func finishDetectTurn(tag string, result *TurnResult) {
 	}
 	ClearPendingMCPIntent("detect done")
 	if result.EndConversation || !SessionAlive() || InBlackjackGameMode() ||
-		(!ContinuousMode() && !AmbientHold() && !OpenMic()) {
+		(!ContinuousMode() && !StandHoldMode() && !AmbientHold() && !OpenMic()) {
 		log.Println(tag, "detect reply done — mic closed until Hey Vector")
 		return
 	}

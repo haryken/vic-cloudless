@@ -293,6 +293,9 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	// 12s is the gap from before that: long enough for those pauses, still
 	// ends a stream that never sends TTSStop.
 	const ttsAfterAudioIdle = 12 * time.Second
+	// Mid-list / mid-clause (trailing comma) often needs a longer pause before
+	// the next Opus chunk — give the cloud more time before we cut.
+	const ttsIncompleteIdle = 20 * time.Second
 	// 250s cut every "super long" story while Opus was still arriving
 	// (log: "TTS absolute deadline reached" at ~4m10s, then the mic reopened).
 	// Silence is already ended by ttsAfterAudioIdle. This cap only stops a
@@ -305,9 +308,16 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	ttsPhaseStart := time.Now()
 	var firstAudioAt time.Time
 	lastAudioAt := time.Time{}
+	// lastTTSActivity covers Opus + sentence_start + LLM chunks so a pause
+	// between announced sentences does not trip idle before more audio arrives.
+	lastTTSActivity := time.Time{}
 	audioFrames := 0
 	audioOpusBytes := 0
 	pcmBytesStreamed := 0
+	partialTTSAbort := false
+	var audioProbe ttsAudioProbe
+	bindTTSProbe(&audioProbe)
+	defer bindTTSProbe(nil)
 
 	abortServerTTS := func(reason string) {
 		MarkPendingServerAbort()
@@ -316,6 +326,33 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 			log.Println("[Xiaozhi] abort speaking:", err)
 		}
 		client.DrainEventChannels()
+		// Truncating mid-reply then reusing the same WSS lets tenclass mix the
+		// aborted generation into the next turn (garbled interleaved text/audio).
+		if reason == "idle_timeout" || reason == "max_duration" || reason == "soft_cap" {
+			partialTTSAbort = true
+		}
+	}
+
+	noteTTSActivity := func() {
+		lastTTSActivity = time.Now()
+	}
+
+	// Trailing comma / ellipsis / no terminal punct → reply likely mid-thought.
+	sentenceLooksIncomplete := func(s string) bool {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return false
+		}
+		r := []rune(s)
+		last := r[len(r)-1]
+		switch last {
+		case '.', '!', '?', '。', '！', '？', '…':
+			return false
+		case ',', '、', ';', ':', '，', '；', '：':
+			return true
+		default:
+			return true
+		}
 	}
 
 	endStream := func() {
@@ -395,6 +432,7 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 		pcmBytesStreamed = 0
 		firstAudioAt = time.Time{}
 		lastAudioAt = time.Time{}
+		lastTTSActivity = time.Time{}
 		sawTTSStart = false
 		ttsStarted = false
 		ttsSentences = nil
@@ -411,11 +449,14 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 				ttsStarted = true
 				sawTTSStart = true
 				MarkTTSPending()
-				log.Println("[Xiaozhi][TTS] start (server)")
+				noteTTSActivity()
+				audioProbe.reset()
+				log.Printf("[Xiaozhi][TTS] start (server); tts_gain=%d%%", ttsGainPct.Load())
 			case TTSStateSentenceStart:
 				if ttsMsg.Text != "" {
 					responseText = ttsMsg.Text
 					ttsSentences = append(ttsSentences, ttsMsg.Text)
+					noteTTSActivity()
 					log.Printf("[Xiaozhi][TTS] sentence #%d: %q", len(ttsSentences), ttsMsg.Text)
 				}
 			case TTSStateStop:
@@ -465,6 +506,7 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 					// Clear intro frame counts so a later stop cannot look like analysis.
 					if AwaitPostCaptureStream() || StreamAppendSuspended() {
 						lastAudioAt = time.Time{}
+						lastTTSActivity = time.Time{}
 						sawTTSStart = false
 						audioFrames = 0
 						pcmBytesStreamed = 0
@@ -490,6 +532,7 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 						log.Printf("[Xiaozhi][TTS] transcript (%d): %s",
 							len(ttsSentences), strings.Join(ttsSentences, " | "))
 					}
+					audioProbe.logSummary("stop")
 					if dropped > 0 {
 						log.Printf("[Xiaozhi][TTS] WARNING: %d WSS frames dropped — possible missing head", dropped)
 					}
@@ -508,6 +551,7 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 				}
 				// Skip emoji-only LLM chatter in logs.
 				if len([]rune(llmMsg.Text)) > 2 {
+					noteTTSActivity()
 					log.Printf("[Xiaozhi][LLM] chunk: %q", llmMsg.Text)
 				}
 			}
@@ -527,10 +571,12 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 				continue
 			}
 			pcm16k := Downsample24kTo16k(pcm24k)
+			audioProbe.noteDownsample(pcm16k)
 			if !doStream {
 				audioFrames++
 				audioOpusBytes += len(opusFrame)
 				lastAudioAt = time.Now()
+				noteTTSActivity()
 				allPCM = append(allPCM, pcm16k...)
 				continue
 			}
@@ -562,6 +608,7 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 			audioFrames++
 			audioOpusBytes += len(opusFrame)
 			lastAudioAt = time.Now()
+			noteTTSActivity()
 
 			if !streamStarted {
 				if AwaitPostCaptureStream() || PostCaptureToolDone() {
@@ -715,13 +762,23 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 				continue
 			}
 			// After real Opus: short idle so a late TTSStop does not leave the
-			// mic closed for seconds. Hold longer while an MCP tool may resume TTS.
+			// mic closed for seconds. Hold longer while an MCP tool may resume TTS,
+			// or while the last sentence still looks mid-thought (trailing comma).
 			idleLimit := ttsAfterAudioIdle
+			if len(ttsSentences) > 0 && sentenceLooksIncomplete(ttsSentences[len(ttsSentences)-1]) {
+				idleLimit = ttsIncompleteIdle
+			}
 			if _, _, ok := PeekMCPIntentQueued(); ok {
 				idleLimit = 8 * time.Second
 			}
-			if time.Since(lastAudioAt) > idleLimit {
-				log.Printf("[Xiaozhi] TTS idle %v since last audio — ending stream (partial ok)", idleLimit)
+			// Prefer lastTTSActivity so sentence_start / LLM chunks between Opus
+			// bursts do not look like a dead stream.
+			idleSince := lastAudioAt
+			if !lastTTSActivity.IsZero() && lastTTSActivity.After(idleSince) {
+				idleSince = lastTTSActivity
+			}
+			if time.Since(idleSince) > idleLimit {
+				log.Printf("[Xiaozhi] TTS idle %v since last activity — ending stream (partial ok)", idleLimit)
 				ClearAwaitPostCaptureStream()
 				abortServerTTS("idle_timeout")
 				ttsStopped = true
@@ -767,6 +824,9 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	log.Printf("[Xiaozhi][Mic] turn done STT=%q", sttText)
 	log.Printf("[Xiaozhi][TTS] turn done text=%q sentences=%d streamed=%v pcmBytes=%d",
 		ttsOut, len(ttsSentences), doStream && streamStarted, pcmBytesStreamed)
+	if audioProbe.frames > 0 {
+		audioProbe.logSummary("turn_done")
+	}
 
 	result := &TurnResult{
 		STTText:           sttText,
@@ -781,6 +841,10 @@ func runTurn(ctx context.Context, audioStream <-chan []byte, cfg Config, afterST
 	if result.EndConversation {
 		forceClose = true
 		log.Println("[Xiaozhi] end conversation — WSS will close; no continuous relisten")
+	}
+	if partialTTSAbort {
+		forceClose = true
+		log.Println("[Xiaozhi] partial TTS abort — closing WSS so the next turn starts clean")
 	}
 	if !streamStarted && len(allPCM) > 0 {
 		result.PCMChunks = ChunkPCM(allPCM)

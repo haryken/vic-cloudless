@@ -89,13 +89,17 @@ func (d *Decoder) DecodeFrame(opusData []byte) ([]byte, error) {
 		in[i] = float64(pcm[i]) * 32768
 		peak = math.Max(peak, math.Abs(in[i]))
 	}
-	if peak > 32767 && !d.hot {
+	overFS := peak > 32767
+	if overFS && !d.hot {
 		d.hot = true
-		log.Printf("[Xiaozhi][TTS] server audio peaks %.2f dB over full scale — limiting instead of clipping",
-			20*math.Log10(peak/32767))
+		log.Printf("[Xiaozhi][TTS] server audio peaks %.2f dB over full scale — limiting instead of clipping (tts_gain=%d%%)",
+			20*math.Log10(peak/32767), ttsGainPct.Load())
 	}
 	var out []byte
 	out, d.reduce = limitSamples(in, d.reduce)
+	if p := curTTSProbe.Load(); p != nil {
+		p.noteDecode(peak, overFS, d.reduce)
+	}
 	return out, nil
 }
 

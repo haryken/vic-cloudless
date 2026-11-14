@@ -175,6 +175,9 @@ procloop:
 			case cloud.MessageTag_Hotword:
 				// hotword = get ready to stream data
 				if xiaozhi.Enabled() {
+					// Mark wake immediately so face greet cannot race in before
+					// BindTurn / SessionAlive (those come later in RunTurn).
+					xiaozhi.NoteConversation()
 					// Hey Vector during device music: stop the song (no "phát hết
 					// nhạc" detect) and fall through to a normal listen.
 					if xiaozhi.StopMusic("wake_word_detected") {
@@ -244,10 +247,10 @@ procloop:
 				chipperOpts := p.defaultChipperOptions()
 				// Same condition vic-anim uses to lift its mic window (Normal streams only).
 				// Open/gate: no stream deadline — anim holds the mic until stopSignal
-				// (speech sent). VADStreamTimeout (34s) was closing quiet open-mic
-				// listens and causing ting→34s→ting loops.
+				// (speech sent). Continuous/ambient use VADStreamTimeout (~34s).
 				if xiaozhi.Enabled() && mode == cloud.StreamType_Normal && xiaozhi.ListenVADActive() {
-					if xiaozhi.OpenMic() {
+					if xiaozhi.OpenMic() || xiaozhi.StandHoldMode() {
+						// Open / stand hold past the ~34s continuous VAD stream cap.
 						chipperOpts.Timeout = 0
 					} else {
 						chipperOpts.Timeout = xiaozhi.VADStreamTimeout
