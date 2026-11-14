@@ -37,10 +37,11 @@ const (
 // ErrNoSpeech: "vad" listen closed because nobody spoke; caller ends quietly.
 var ErrNoSpeech = listenvad.ErrNoSpeech
 
-// VADListenMode: end-of-speech listening is the default; only an explicit
-// "fixed" keeps Vector's ~6s window. Direct-API backends always use VAD.
+// VADListenMode is always true: the fixed ~6s Vector window was removed.
+// listen_mode "fixed" in old configs is ignored; Direct-API backends already
+// used end-of-speech and now Xiaozhi does too.
 func VADListenMode(cfg Config) bool {
-	return cfg.ListenMode != ListenModeFixed || IsDirectAPIBackend(cfg.Backend)
+	return true
 }
 
 // ListenVADActive reports the /run flag that vic-anim latched for this stream.
@@ -50,9 +51,10 @@ func ListenVADActive() bool {
 	return err == nil
 }
 
-// SyncListenVADFlag mirrors listen_mode into /run for vic-anim / vic-engine.
+// SyncListenVADFlag keeps the VAD flag for vic-anim / vic-engine while Xiaozhi
+// (or any AI chat backend) is enabled. Fixed ~6s mode is gone.
 func SyncListenVADFlag(cfg Config) {
-	if cfg.Enabled && VADListenMode(cfg) {
+	if cfg.Enabled {
 		_ = os.MkdirAll(filepath.Dir(ListenVADFlagPath), 0775)
 		_ = os.WriteFile(ListenVADFlagPath, []byte("1"), 0664)
 		return

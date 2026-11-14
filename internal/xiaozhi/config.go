@@ -27,8 +27,7 @@ type Config struct {
 	TTSMode               string `json:"tts_mode"`
 	GameGoogleTTSVI       bool   `json:"game_google_tts_vi"`
 	GameGoogleTTSLang     string `json:"game_google_tts_lang,omitempty"`
-	// ListenMode: "vad" (default, also when empty) = keep the mic open until the
-	// server returns STT (see listen_vad.go); "fixed" = Vector's ~6s mic window.
+	// ListenMode is always end-of-speech ("vad"). Legacy "fixed" (~6s) is ignored.
 	ListenMode string `json:"listen_mode,omitempty"`
 	// MusicSource: "server" (default) leaves music to the Xiaozhi server;
 	// "youtube" lists self.music.play, which streams from MusicServerURL.
@@ -119,6 +118,8 @@ func LoadConfig() Config {
 	if cfg.ConversationMode == "" {
 		cfg.ConversationMode = "continuous"
 	}
+	// Fixed ~6s removed — always end-of-speech.
+	cfg.ListenMode = ListenModeVAD
 	globalCfg = cfg
 	SyncListenVADFlag(cfg)
 	SyncOpenMicModeFlag(cfg)
