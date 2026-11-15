@@ -49,10 +49,18 @@ type Config struct {
 	// FaceGreetEveryMin: minimum minutes between face greetings; unset = 5,
 	// 0 = no wait (greet whenever someone arrives and no chat is running).
 	FaceGreetEveryMin *int `json:"face_greet_every_min,omitempty"`
+	// SelfControlResume: after an AI voice self-control action finishes,
+	// send detect "xong hành động" so the AI speaks and the mic reopens.
+	// Off (default) = old behavior: mic stays closed until Hey Vector.
+	// UI actions (eye color, etc.) never trigger this.
+	SelfControlResume bool `json:"self_control_resume,omitempty"`
 	// TTSGainPct scales every AI voice before the speaker.
 	// 100 = ALSA full (as received); <100 quieter (≈ old Wwise LOW near 25–40);
 	// >100 boosts the voice band.
 	TTSGainPct int `json:"tts_gain_pct,omitempty"`
+	// TTSPlayback: "classic" (default) = current ALSA FIFO + gap keepalive;
+	// "smooth" = ESP-like PCM prefill then continuous write (less stutter).
+	TTSPlayback string `json:"tts_playback,omitempty"`
 	// GateRMS is the "gate" mode floor. Audio stays on the robot until a
 	// voice stays above this RMS. 0 means the default (800).
 	GateRMS int `json:"gate_rms,omitempty"`
@@ -124,6 +132,7 @@ func LoadConfig() Config {
 	SyncListenVADFlag(cfg)
 	SyncOpenMicModeFlag(cfg)
 	setTTSGain(cfg.TTSGainPct)
+	SetTTSPlaybackMode(cfg.TTSPlayback)
 	return cfg
 }
 

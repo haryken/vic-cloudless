@@ -1,6 +1,9 @@
 /* Play raw 16 kHz mono s16le on Vector MultiMedia2.
  * tinyplay ignores -n, so its ring stays 128ms and sentence gaps underrun.
  * period 1024 x 8 is 512ms and still consumes at realtime (measured on device).
+ * x10/x16 fail pcm_open on Vector MM2 — do not raise period_count.
+ * Gap underruns are held from Go with a one-period silence prime (see
+ * alsa_player.go), not by enlarging this ring.
  * The Q6 DSP crackles for the whole utterance if a write is shorter than one
  * period, so bytes are held until 2048 (1024 frames) are ready.
  * start_threshold is one period: the first word starts on that first write.

@@ -83,6 +83,7 @@ func (strm *Streamer) deliverDeferredSelfControlIfAny() bool {
 			Parameters: paramsJSON,
 		})
 	})
+	xiaozhi.ArmAISelfControlDone(intent)
 	log.Printf("[Xiaozhi][KeepawayFlow] step=intent_sent_to_engine intent=%s (mic stays closed)", intent)
 	log.Println("[Xiaozhi] self-control done — mic closed until manual wake; session:", xiaozhi.ActiveSessionID())
 	return true
@@ -193,6 +194,7 @@ func (strm *Streamer) runXiaozhiTurn() {
 							sent = true
 						})
 						if sent {
+							xiaozhi.ArmAISelfControlDone(intent)
 							log.Println("[Xiaozhi] MCP intent delivered on same listen (no FakeTrigger):", intent)
 							return
 						}
@@ -386,6 +388,7 @@ func (strm *Streamer) runXiaozhiTurn() {
 				Parameters: paramsJSON,
 			})
 		}
+		xiaozhi.ArmAISelfControlDone(result.RobotIntent)
 		if result.RobotIntent == "intent_play_blackjack" {
 			xiaozhi.PrepareBlackjackSTT("after TTS dispatch")
 		}

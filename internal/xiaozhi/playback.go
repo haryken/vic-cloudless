@@ -634,15 +634,18 @@ func ArmStreamWithSilencePrime() (primeBytes int, err error) {
 		if err := alsaStart(); err != nil {
 			return 0, err
 		}
-		// One 32ms period opens the stream. The 3-chunk + 150ms head pad
-		// (~246ms) played as silence before the first word.
-		silence := make([]byte, SilencePrimeChunkBytes)
-		if _, err := alsaWrite(silence); err != nil {
-			AlsaCancel()
-			return primeBytes, fmt.Errorf("alsa silence prime: %w", err)
+		// Smooth prefill is real speech — do not burn the queue on silence prime.
+		// Classic still needs a tiny prime so xiaozhi-play leaves read() promptly.
+		if !alsaSmoothMode.Load() {
+			silence := make([]byte, SilencePrimeChunkBytes)
+			if _, err := alsaWrite(silence); err != nil {
+				AlsaCancel()
+				return primeBytes, fmt.Errorf("alsa silence prime: %w", err)
+			}
+			primeBytes += SilencePrimeChunkBytes
 		}
-		primeBytes += SilencePrimeChunkBytes
-		log.Printf("[Xiaozhi][ALSA] armed (prime=%dB) — ExternalAudio skipped", primeBytes)
+		log.Printf("[Xiaozhi][ALSA] armed (prime=%dB, mode=%s) — ExternalAudio skipped",
+			primeBytes, TTSPlaybackMode())
 		return primeBytes, nil
 	}
 	if err := streamPrepareFile(); err != nil {

@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,11 +44,30 @@ const (
 	alsaPeriodCount = "40"
 	alsaMixerMM2    = "PRI_MI2S_RX Audio Mixer MultiMedia2"
 	alsaQueueCap    = 512
-	// Silence drip only after typical Xiaozhi sentence gaps (~450–500ms).
-	// Pad at 400–460ms fired while the next Opus was still in flight → "vấp".
-	// period_count stays 8 (512ms ring); 16 fails pcm_open on Vector MM2.
+	// Silence drip for long server stalls, but NOT into Xiaozhi inter-sentence
+	// holes. Measured vấp (goodbye): pad@460ms fired at 463ms idle between
+	// "Chào bạn!" and "Hẹn gặp lại nhé!" — next Opus still in flight.
+	// Pad@900ms left 512→900ms underrun (giật). Sweet spot: just above those
+	// ~450–470ms sentence holes, just under the 512ms ring; first pad write =
+	// one full period (2048B) so silence hits ALSA immediately (drips alone
+	// need ~64ms to coalesce in xiaozhi-play). ×10/×16 fail pcm_open on MM2.
 	alsaKeepaliveEvery = 8 * time.Millisecond
 	alsaKeepaliveBytes = 256 // 128 frames * 2 bytes = 8ms @ 16kHz mono
+	// One period of s16le mono @16kHz — first pad write flushes xiaozhi-play immediately.
+	alsaKeepalivePrime  = 2048
+	alsaMinGapBeforePad = 500 * time.Millisecond
+	alsaMaxGapPad       = 60 * time.Second
+	// Smooth ≈ ESP audio_service: PCM queue → blocking FIFO write (fills the
+	// kernel pipe + 512ms HW ring). Never pace-throttle writes — that starved
+	// ALSA and crackled ("rè") the whole utterance. Prefill ~960ms once, then
+	// write as fast as the pipe accepts. No gap-silence drip (that also rè).
+	alsaSmoothPrefillBytes = 30720 // ~960ms = ESP MAX_PLAYBACK_TASKS_IN_QUEUE×60ms
+	alsaSmoothMaxSoftBytes = 48000 // ~1.5s cap
+	alsaSmoothPeriodBytes  = 2048  // one ALSA period (matches xiaozhi-play)
+	alsaSmoothPrefillWait  = 3 * time.Second
+
+	TTSPlaybackClassic = "classic"
+	TTSPlaybackSmooth  = "smooth"
 )
 
 var (
@@ -61,7 +82,24 @@ var (
 	alsaReady        atomic.Bool
 	mixerReady       atomic.Bool
 	alsaKeepalive    atomic.Bool
+	alsaSmoothMode   atomic.Bool
 )
+
+// SetTTSPlaybackMode selects classic (gap keepalive) or smooth (prefill).
+// Empty / unknown → classic. Safe to call from LoadConfig on every turn.
+func SetTTSPlaybackMode(mode string) {
+	m := strings.ToLower(strings.TrimSpace(mode))
+	on := m == TTSPlaybackSmooth || m == "new" || m == "esp"
+	alsaSmoothMode.Store(on)
+}
+
+// TTSPlaybackMode returns the active mode string for UI/status.
+func TTSPlaybackMode() string {
+	if alsaSmoothMode.Load() {
+		return TTSPlaybackSmooth
+	}
+	return TTSPlaybackClassic
+}
 
 // UseAlsaPlayback reports whether Xiaozhi TTS should go to ALSA (Plan B).
 func UseAlsaPlayback() bool {
@@ -79,10 +117,54 @@ func tinymixSet(control, value string) {
 	}
 }
 
+func tinymixGet(control string) string {
+	out, err := exec.Command("tinymix", "get", control).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// EnsureCodecGainsSane repairs debug leftovers that make Wwise/intent SFX
+// (fireworks, dance, …) ignore Âm lượng hệ thống. Seen on-device: RX3 Digital
+// Volume stuck at 330 while tinymix range is 0–124 — system "Thấp" still screamed.
+// Does not change in-range gains or master_volume; only clamps illegal values
+// back to the stock baseline (84).
+func EnsureCodecGainsSane() {
+	// Never disable MultiMedia1 for mute — Wwise AkAlsaSink then fails with
+	// Device busy and system SFX stay dead after raising volume. Only repair
+	// illegal RX gains; keep MM1 on.
+	_ = exec.Command("sudo", "-n", "/anki/bin/wireos-speaker-gain", "84").Run()
+	const stock = "84"
+	for _, ctl := range []string{"RX1 Digital Volume", "RX2 Digital Volume", "RX3 Digital Volume"} {
+		raw := tinymixGet(ctl)
+		if raw == "" {
+			continue
+		}
+		// tinymix get → "84 (range 0->124)"
+		field := strings.Fields(raw)
+		if len(field) == 0 {
+			continue
+		}
+		n, err := strconv.Atoi(field[0])
+		if err != nil {
+			continue
+		}
+		if n > 124 || n < 0 {
+			log.Printf("[Xiaozhi][ALSA] codec %s out of range (%q) — reset to %s (Wwise/system SFX)", ctl, raw, stock)
+			tinymixSet(ctl, stock)
+		}
+	}
+}
+
 func ensureMM2Mixer() {
 	if mixerReady.Load() {
 		return
 	}
+	// Only enable MultiMedia2 for AI TTS. Never touch MultiMedia1, RX1/RX2,
+	// Speaker Boost, or master_volume — those are the Wwise/system path so
+	// UI Mute must keep muting footsteps/power beeps while Xiaozhi still talks
+	// via MM2 + tts_gain_pct on PCM.
 	tinymixSet(alsaMixerMM2, "1")
 	mixerReady.Store(true)
 	log.Println("[Xiaozhi][ALSA] MultiMedia2 mixer enabled")
@@ -176,6 +258,7 @@ func alsaStart() error {
 
 	pcmCh := make(chan []byte, alsaQueueCap)
 	done := make(chan struct{})
+	smooth := alsaSmoothMode.Load()
 	alsaCmd = cmd
 	alsaWriter = w
 	alsaPCMCh = pcmCh
@@ -184,16 +267,24 @@ func alsaStart() error {
 	alsaRealBytes = 0
 	alsaPendingBytes = 0
 	alsaReady.Store(true)
-	// Do not pad during ~0.5s server gaps (that hitch is the "vấp").
+	// Classic + smooth both may pad on long idle; thresholds differ in the pump.
 	alsaKeepalive.Store(true)
 
-	go alsaPump(w, pcmCh, done, cmd)
+	go alsaPump(w, pcmCh, done, cmd, smooth)
 
-	log.Printf("[Xiaozhi][ALSA] player started (%s, period 1024 x8, silence after 900ms)", player)
+	if smooth {
+		log.Printf("[Xiaozhi][ALSA] player started (%s, mode=smooth, prefill≈%dms queue≤%dms)",
+			player,
+			alsaSmoothPrefillBytes*1000/(16000*2),
+			alsaSmoothMaxSoftBytes*1000/(16000*2))
+	} else {
+		log.Printf("[Xiaozhi][ALSA] player started (%s, mode=classic, silence after %v)",
+			player, alsaMinGapBeforePad)
+	}
 	return nil
 }
 
-func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd) {
+func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd, smooth bool) {
 	defer func() {
 		alsaKeepalive.Store(false)
 		_ = w.Close()
@@ -215,17 +306,13 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 	}()
 
 	silence := make([]byte, alsaKeepaliveBytes)
+	primeSilence := make([]byte, alsaKeepalivePrime)
 	ticker := time.NewTicker(alsaKeepaliveEvery)
 	defer ticker.Stop()
 
 	var lastRealPCM time.Time
 	var gapLogged bool
-	// Measured vấp: gap silence @~466ms then next sentence. Keep pad above
-	// those Xiaozhi inter-sentence holes; ring is still 512ms (×8).
-	const (
-		minGapBeforePad = 900 * time.Millisecond
-		maxGapPad       = 60 * time.Second
-	)
+	var gapPrimed bool
 
 	writeFIFO := func(pcm []byte, realSpeech bool) error {
 		if len(pcm) == 0 {
@@ -248,13 +335,109 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 		return err
 	}
 
+	if smooth {
+		// ESP-like: one goroutine fills soft[], another drains to FIFO as fast
+		// as the pipe/HW accepts (blocking Write). Prefill once, then no silence
+		// drip — pacing + early PLC were what made the whole sentence crackle.
+		var softMu sync.Mutex
+		soft := make([]byte, 0, alsaSmoothMaxSoftBytes)
+		softClosed := false
+		softCV := sync.NewCond(&softMu)
+		prefillDeadline := time.Now().Add(alsaSmoothPrefillWait)
+		writerDone := make(chan struct{})
+
+		go func() {
+			defer close(writerDone)
+			started := false
+			for {
+				softMu.Lock()
+				for {
+					if softClosed && len(soft) == 0 {
+						softMu.Unlock()
+						return
+					}
+					if !started {
+						ready := len(soft) >= alsaSmoothPrefillBytes ||
+							(len(soft) > 0 && time.Now().After(prefillDeadline)) ||
+							(softClosed && len(soft) > 0)
+						if !ready {
+							softCV.Wait()
+							continue
+						}
+						started = true
+						log.Printf("[Xiaozhi][ALSA] smooth prefill start %dB (%.0fms)",
+							len(soft), float64(len(soft))*1000/(16000*2))
+					}
+					if len(soft) >= alsaSmoothPeriodBytes || (softClosed && len(soft) > 0) {
+						break
+					}
+					softCV.Wait()
+				}
+				n := alsaSmoothPeriodBytes
+				if len(soft) < n {
+					n = len(soft)
+				}
+				// Always write full periods — short pcm_write crackles on MM2.
+				chunk := make([]byte, alsaSmoothPeriodBytes)
+				copy(chunk, soft[:n])
+				soft = soft[n:]
+				softMu.Unlock()
+				if err := writeFIFO(chunk, true); err != nil {
+					log.Println("[Xiaozhi][ALSA] smooth write:", err)
+					softMu.Lock()
+					softClosed = true
+					soft = soft[:0]
+					softCV.Broadcast()
+					softMu.Unlock()
+					return
+				}
+			}
+		}()
+
+		appendSoft := func(pcm []byte) {
+			softMu.Lock()
+			defer softMu.Unlock()
+			if softClosed {
+				return
+			}
+			soft = append(soft, pcm...)
+			if len(soft) > alsaSmoothMaxSoftBytes {
+				overflow := len(soft) - alsaSmoothMaxSoftBytes
+				overflow -= overflow % alsaSmoothPeriodBytes
+				if overflow > 0 {
+					soft = soft[overflow:]
+				}
+			}
+			softCV.Signal()
+		}
+
+		for {
+			select {
+			case pcm, ok := <-pcmCh:
+				if !ok {
+					softMu.Lock()
+					softClosed = true
+					softCV.Broadcast()
+					softMu.Unlock()
+					<-writerDone
+					tail := make([]byte, 1024*2*5)
+					_, _ = w.Write(tail)
+					return
+				}
+				if len(pcm) > 0 {
+					appendSoft(pcm)
+				}
+			case <-ticker.C:
+				// Smooth: no gap silence. Pipe + prefill absorb holes.
+			}
+		}
+	}
+
+	// Classic path: write-through + gap keepalive.
 	for {
 		select {
 		case pcm, ok := <-pcmCh:
 			if !ok {
-				// Brief ring fill only (~300ms) so tinyplay doesn't underrun on
-				// EOF. Longer pads (2.5s) made users wait in silence before mic
-				// reopened after TTS finished.
 				tail := make([]byte, 1024*2*5) // ~320ms @ 16kHz s16le mono
 				if _, err := w.Write(tail); err != nil {
 					_ = err
@@ -266,28 +449,33 @@ func alsaPump(w *os.File, pcmCh <-chan []byte, done chan struct{}, cmd *exec.Cmd
 			}
 			lastRealPCM = time.Now()
 			gapLogged = false
+			gapPrimed = false
 			if err := writeFIFO(pcm, true); err != nil {
 				log.Println("[Xiaozhi][ALSA] write:", err)
 				return
 			}
 		case <-ticker.C:
-			if !alsaKeepalive.Load() || len(pcmCh) > 0 {
+			if len(pcmCh) > 0 || !alsaKeepalive.Load() {
 				continue
 			}
 			if lastRealPCM.IsZero() {
 				continue
 			}
 			idle := time.Since(lastRealPCM)
-			if idle < minGapBeforePad || idle > maxGapPad {
+			if idle < alsaMinGapBeforePad || idle > alsaMaxGapPad {
 				continue
 			}
 			if !gapLogged {
-				log.Printf("[Xiaozhi][ALSA] gap silence after %v idle — holding ring (pad≥900ms)",
-					idle.Round(time.Millisecond))
+				log.Printf("[Xiaozhi][ALSA] gap silence after %v idle — holding ring (pad≥%v, mode=classic)",
+					idle.Round(time.Millisecond), alsaMinGapBeforePad)
 				gapLogged = true
 			}
-			// realSpeech=false: drips must not keep the mic closed after the last word.
-			if err := writeFIFO(silence, false); err != nil {
+			chunk := silence
+			if !gapPrimed {
+				chunk = primeSilence
+				gapPrimed = true
+			}
+			if err := writeFIFO(chunk, false); err != nil {
 				log.Println("[Xiaozhi][ALSA] keepalive write:", err)
 				return
 			}

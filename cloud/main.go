@@ -111,10 +111,14 @@ func main() {
 	// Load Xiaozhi config early so all subsystems can check Enabled().
 	xiaozhiCfg := xzcloudinit()
 	xiaozhi.StartConfigReloadWatcher()
+	xiaozhi.StartIntentDoneWatcher()
 	if xiaozhiCfg.Enabled {
 		log.Println("Xiaozhi integration enabled; endpoint:", xiaozhiCfg.Endpoint)
 		// Xiaozhi replaces local STT — skip Vosk model (~tens of MB RSS).
 		log.Println("Xiaozhi enabled — skipping Vosk STT model load (RAM)")
+		// Debug tinymix can leave RX* Digital Volume out of range (e.g. 330);
+		// that makes fireworks/intent SFX ignore Âm lượng hệ thống (Wwise).
+		xiaozhi.EnsureCodecGainsSane()
 	} else {
 		fmt.Println("loading vosk...")
 		vtr.InitVosk()
